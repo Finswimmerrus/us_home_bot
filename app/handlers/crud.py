@@ -1,0 +1,1260 @@
+from __future__ import annotations
+
+import logging
+from datetime import date, datetime
+from typing import Any
+
+from aiogram import Router
+from aiogram.filters import Command, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, Message
+from sqlalchemy.exc import IntegrityError
+
+from app.exceptions import ValidationError
+from app.handlers.fsm import (
+    CoupleNameFSM,
+    ListCreateFSM,
+    ListItemCreateFSM,
+    MovieCreateFSM,
+    MovieEditFSM,
+    MovieRatingFSM,
+    NoteCreateFSM,
+    NoteEditFSM,
+    PlaceCreateFSM,
+    SettingsDisplayFSM,
+    SettingsTimezoneFSM,
+    TaskCreateFSM,
+    TaskEditFSM,
+    TripCreateFSM,
+    WishlistCreateFSM,
+)
+from app.handlers.sections import (
+    _format_lists,
+    _format_movies,
+    _format_notes,
+    _format_tasks,
+    _format_trips,
+    _format_wishlist,
+    _task_list_keyboard,
+)
+from app.handlers.start import MAIN_MENU
+from app.services.couple_service import CoupleService
+from app.services.list_service import ListService
+from app.services.movie_service import VALID_MOVIE_STATUSES, MovieService
+from app.services.note_service import NoteService
+from app.services.settings_service import SettingsService
+from app.services.task_service import VALID_PRIORITIES, TaskService
+from app.services.trip_service import PlaceService, TripService
+from app.services.wishlist_service import VALID_WISHLIST_STATUSES, WishlistService
+from app.utils.callbacks import (
+    CANCEL_BUTTON,
+    SKIP_VALUES,
+    alert_callback,
+    back_to_menu_keyboard,
+    callback_int,
+    cancel_keyboard,
+    get_couple,
+    inline_keyboard,
+    optional_keyboard,
+    reply_callback,
+    require_user_id,
+)
+from app.utils.context import Context
+
+logger = logging.getLogger(__name__)
+router = Router()
+
+TASK_STATUS_TRANSITIONS: dict[str, list[str]] = {
+    "TODO": ["IN_PROGRESS", "DONE", "CANCELLED"],
+    "IN_PROGRESS": ["TODO", "DONE", "CANCELLED"],
+    "DONE": ["TODO", "IN_PROGRESS"],
+    "CANCELLED": ["TODO", "IN_PROGRESS"],
+}
+TASK_STATUS_LABEL = {
+    "TODO": "К выполнению",
+    "IN_PROGRESS": "В процессе",
+    "DONE": "Готово",
+    "CANCELLED": "Отменено",
+}
+
+
+async def _uc(context: Context, session: Any) -> tuple[Any, int]:
+    user_id = require_user_id(context)
+    couple = await get_couple(session, user_id)
+    return couple, user_id
+
+
+def _parse_datetime(text: str | None) -> datetime | None:
+    text = (text or "").strip()
+    for fmt in (
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%dT%H:%M",
+        "%d.%m.%Y %H:%M",
+        "%Y-%m-%d",
+        "%d.%m.%Y",
+    ):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_date(text: str | None) -> date | None:
+    text = (text or "").strip()
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _fmt_dt(value: Any) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, datetime):
+        return value.strftime("%d.%m.%Y %H:%M")
+    return value.strftime("%d.%m.%Y")
+
+
+def _norm(text: str | None) -> str:
+    return (text or "").strip()
+
+
+def _is_skip(text: str | None) -> bool:
+    return _norm(text).lower() in SKIP_VALUES
+
+
+def _priority_keyboard(callback_prefix: str) -> Any:
+    return inline_keyboard(
+        [
+            [("Низкий", f"{callback_prefix}:LOW"), ("Обычный", f"{callback_prefix}:NORMAL")],
+            [("Высокий", f"{callback_prefix}:HIGH")],
+        ]
+    )
+
+
+def _task_text(task: Any) -> str:
+    assignee = f" (назначена: {task.assigned_to})" if task.assigned_to else ""
+    return (
+        f"📌 {task.title}\n"
+        f"Статус: {task.status}\n"
+        f"Приоритет: {task.priority}{assignee}\n"
+        f"Дедлайн: {_fmt_dt(task.due_at)}\n"
+        f"ID: {task.id}"
+    )
+
+
+def _task_detail_markup(task: Any) -> Any:
+    rows: list[list[tuple[str, str]]] = [
+        [("Редактировать", f"task:edit:{task.id}")],
+        [("Заголовок", f"task:field:{task.id}:title"),
+         ("Описание", f"task:field:{task.id}:description")],
+        [("Приоритет", f"task:field:{task.id}:priority"),
+         ("Дедлайн", f"task:field:{task.id}:due_at")],
+    ]
+    for status in TASK_STATUS_TRANSITIONS.get(task.status, []):
+        rows.append([(TASK_STATUS_LABEL[status], f"task:status:{task.id}:{status}")])
+    rows.append([("Удалить", f"task:delete:{task.id}"), ("Назад", "tasks:list")])
+    return inline_keyboard(rows)
+
+
+async def _cancel_flow(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Отменено.", reply_markup=MAIN_MENU)
+
+
+@router.message(StateFilter("*"), Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext) -> None:
+    await _cancel_flow(message, state)
+
+
+@router.message(StateFilter("*"), lambda m: (m.text or "").strip().lower() == CANCEL_BUTTON.lower())
+async def btn_cancel(message: Message, state: FSMContext) -> None:
+    await _cancel_flow(message, state)
+
+
+async def _task_by_callback(callback: CallbackQuery, context: Context, session: Any) -> tuple[Any, Any, int]:
+    parts = callback.data.split(":")
+    task_id = callback_int(parts[2] if len(parts) > 2 and parts[1] in {"edit", "delete"} else parts[1])
+    couple, user_id = await _uc(context, session)
+    task = await TaskService(session).get_task(couple.id, user_id, task_id)
+    return task, couple, user_id
+
+
+@router.callback_query(lambda c: c.data == "tasks:list")
+async def cb_tasks_list(callback: CallbackQuery, context: Context, session: Any) -> None:
+    couple, user_id = await _uc(context, session)
+    items = await TaskService(session).get_all_tasks(couple.id, user_id, limit=20)
+    await reply_callback(callback, _format_tasks(items), _task_list_keyboard(items))
+
+
+@router.callback_query(lambda c: c.data == "tasks:create")
+async def cb_task_create_start(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
+    await _uc(context, session)
+    await state.set_data({"flow": "task_create"})
+    await state.set_state(TaskCreateFSM.title)
+    await reply_callback(callback, "Введите название задачи:", cancel_keyboard())
+
+
+@router.message(TaskCreateFSM.title)
+async def msg_task_title(message: Message, state: FSMContext) -> None:
+    text = _norm(message.text)
+    if not text:
+        await message.answer("Введите название задачи.")
+        return
+    await state.update_data(title=text)
+    await state.set_state(TaskCreateFSM.description)
+    await message.answer("Описание:", reply_markup=optional_keyboard())
+
+
+@router.message(TaskCreateFSM.description)
+async def msg_task_description(message: Message, state: FSMContext) -> None:
+    description = None if _is_skip(message.text) else _norm(message.text)
+    await state.update_data(description=description)
+    await state.set_state(TaskCreateFSM.priority)
+    await message.answer("Приоритет:", reply_markup=_priority_keyboard("task:create:priority"))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("task:create:priority:"))
+async def cb_task_create_priority(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
+    priority = callback.data.split(":")[-1].upper()
+    if priority not in VALID_PRIORITIES:
+        await alert_callback(callback, "Недопустимый приоритет.")
+        return
+    await state.update_data(priority=priority)
+    await state.set_state(TaskCreateFSM.assigned_to)
+    user_id = require_user_id(context)
+    couple = await get_couple(session, user_id)
+    partner = await CoupleService(session).get_other_member(couple.id, user_id)
+    await reply_callback(callback, "Кто выполняет?", _task_assignment_keyboard("task:create:assign", partner))
+
+
+def _task_assignment_keyboard(callback_prefix: str, partner: Any | None = None) -> Any:
+    rows: list[list[tuple[str, str]]] = [
+        [("Мне", f"{callback_prefix}:self"), ("Не назначать", f"{callback_prefix}:none")],
+    ]
+    if partner is not None:
+        name = partner.display_name or partner.first_name or partner.username or "Партнёру"
+        rows.insert(1, [(name, f"{callback_prefix}:partner")])
+    return inline_keyboard(rows)
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("task:create:assign:"))
+async def cb_task_create_assign(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
+    mode = callback.data.split(":")[-1]
+    user_id = require_user_id(context)
+    if mode == "self":
+        assigned_to: int | None = user_id
+    elif mode == "partner":
+        couple = await get_couple(session, user_id)
+        partner = await CoupleService(session).get_other_member(couple.id, user_id)
+        if partner is None:
+            await alert_callback(callback, "Партнёр не найден.")
+            return
+        assigned_to = partner.id
+    elif mode == "none":
+        assigned_to = None
+    else:
+        await alert_callback(callback, "Неверный выбор.")
+        return
+    await state.update_data(assigned_to=assigned_to)
+    await state.set_state(TaskCreateFSM.due_at)
+    await reply_callback(callback, "Введите дедлайн (дд.мм.гггг / гггг-мм-дд):", optional_keyboard())
+
+
+@router.message(TaskCreateFSM.due_at)
+async def msg_task_due_at(message: Message, state: FSMContext) -> None:
+    text = message.text
+    if _is_skip(text):
+        due_at_raw = None
+    else:
+        due_at = _parse_datetime(text)
+        if due_at is None:
+            await message.answer(
+                "Неверный формат даты/времени. Попробуйте снова или нажмите «Пропустить».",
+                reply_markup=optional_keyboard(),
+            )
+            return
+        due_at_raw = due_at.isoformat()
+    await state.update_data(due_at=due_at_raw)
+    data = await state.get_data()
+    summary = _build_task_summary(data)
+    await state.set_state(TaskCreateFSM.confirm)
+    await message.answer(summary, reply_markup=inline_keyboard([[('Подтвердить', 'task:create:confirm'), ('Отмена', 'task:create:cancel')]]))
+
+
+def _build_task_summary(data: dict) -> str:
+    assigned = data.get("assigned_to")
+    assigned_label = "не назначена"
+    if assigned:
+        assigned_label = f"id={assigned}"
+    return (
+        "Создать задачу:\n"
+        f"Название: {data.get('title')}\n"
+        f"Описание: {data.get('description') or '-'}\n"
+        f"Приоритет: {data.get('priority', 'NORMAL')}\n"
+        f"Назначить: {assigned_label}\n"
+        f"Дедлайн: {data.get('due_at') or '-'}"
+    )
+
+
+@router.callback_query(lambda c: c.data == "task:create:confirm")
+async def cb_task_create_confirm(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
+    data = await state.get_data()
+    if not data.get("title"):
+        await alert_callback(callback, "Название не задано.")
+        return
+    couple, user_id = await _uc(context, session)
+    due_raw = data.get("due_at")
+    due_at = datetime.fromisoformat(due_raw) if due_raw else None
+    try:
+        task = await TaskService(session).create_task(
+            couple.id,
+            user_id,
+            _norm(data.get("title")),
+            description=data.get("description"),
+            priority=data.get("priority", "NORMAL"),
+            assigned_to=data.get("assigned_to"),
+            due_at=due_at,
+        )
+    except ValidationError as exc:
+        await alert_callback(callback, exc.message)
+        return
+    except IntegrityError:
+        await session.rollback()
+        await alert_callback(callback, "Не удалось создать задачу.")
+        return
+    await state.clear()
+    await reply_callback(callback, f"Задача создана: {task.title}", _task_detail_markup(task))
+
+
+@router.callback_query(lambda c: c.data == "task:create:cancel")
+async def cb_task_create_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await reply_callback(callback, "Отменено.", MAIN_MENU)
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("task:") and c.data.split(":")[1].isdigit())
+async def cb_task_detail(callback: CallbackQuery, context: Context, session: Any) -> None:
+    task, _, _ = await _task_by_callback(callback, context, session)
+    await reply_callback(callback, _task_text(task), _task_detail_markup(task))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("task:edit:"))
+async def cb_task_edit(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
+    task, _, _ = await _task_by_callback(callback, context, session)
+    await state.set_data({"flow": "task_edit", "item_id": task.id})
+    await state.set_state(TaskEditFSM.value)
+    await reply_callback(
+        callback,
+        "Введите новое значение:",
+        inline_keyboard(
+            [
+                [("Заголовок", f"task:field:{task.id}:title"),
+                 ("Описание", f"task:field:{task.id}:description")],
+                [("Приоритет", f"task:field:{task.id}:priority"),
+                 ("Дедлайн", f"task:field:{task.id}:due_at")],
+                [("Назад", f"task:{task.id}")],
+            ]
+        ),
+    )
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("task:field:") and c.data.split(":")[3] in ("title", "description", "due_at"))
+async def cb_task_field(callback: CallbackQuery, state: FSMContext) -> None:
+    parts = callback.data.split(":")
+    field = parts[3]
+    await state.update_data(item_id=callback_int(parts[2]), field=field)
+    await state.set_state(TaskEditFSM.value)
+    prompt = {
+        "title": "Введите новое название:",
+        "description": "Введите новое описание:",
+        "due_at": "Введите дедлайн или нажмите «Пропустить», чтобы оставить без изменений:",
+    }[field]
+    keyboard = optional_keyboard() if field in {"description", "due_at"} else cancel_keyboard()
+    await reply_callback(callback, prompt, keyboard)
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("task:field:") and c.data.split(":")[3] == "priority")
+async def cb_task_priority_edit(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(field="priority")
+    await reply_callback(callback, "Выберите приоритет:", _priority_keyboard(f"task:priority_edit:{callback.data.split(':')[2]}"))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("task:priority_edit:"))
+async def cb_task_priority_confirm(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
+    parts = callback.data.split(":")
+    task_id = callback_int(parts[2])
+    priority = parts[-1].upper()
+    if priority not in VALID_PRIORITIES:
+        await alert_callback(callback, "Недопустимый приоритет.")
+        return
+    couple, user_id = await _uc(context, session)
+    task = await TaskService(session).update_task(couple.id, user_id, task_id, priority=priority)
+    await state.clear()
+    await reply_callback(callback, _task_text(task), _task_detail_markup(task))
+
+
+@router.message(TaskEditFSM.value)
+async def msg_task_edit_value(message: Message, context: Context, session: Any, state: FSMContext) -> None:
+    data = await state.get_data()
+    field = data.get("field")
+    task_id = callback_int(data.get("item_id"))
+    text = _norm(message.text)
+    couple, user_id = await _uc(context, session)
+    service = TaskService(session)
+    if field == "title":
+        if not text:
+            await message.answer("Введите название.")
+            return
+        task = await service.update_task(couple.id, user_id, task_id, title=text)
+    elif field == "description":
+        desc = None if _is_skip(text) else text
+        task = await service.update_task(couple.id, user_id, task_id, description=desc)
+    elif field == "due_at":
+        if _is_skip(text):
+            task = await service.get_task(couple.id, user_id, task_id)
+        else:
+            due_at = _parse_datetime(text)
+            if due_at is None:
+                await message.answer(
+                    "Неверный формат даты. Попробуйте снова или нажмите «Пропустить».",
+                    reply_markup=optional_keyboard(),
+                )
+                return
+            task = await service.update_task(couple.id, user_id, task_id, due_at=due_at)
+    else:
+        await message.answer("Неизвестное поле.")
+        return
+    await state.clear()
+    await message.answer(_task_text(task), reply_markup=_task_detail_markup(task))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("task:status:"))
+async def cb_task_status(callback: CallbackQuery, context: Context, session: Any) -> None:
+    parts = callback.data.split(":")
+    task_id = callback_int(parts[2])
+    new_status = parts[-1]
+    couple, user_id = await _uc(context, session)
+    task = await TaskService(session).change_status(couple.id, user_id, task_id, new_status)
+    await reply_callback(callback, _task_text(task), _task_detail_markup(task))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("task:delete:"))
+async def cb_task_delete(callback: CallbackQuery, context: Context, session: Any) -> None:
+    task_id = callback_int(callback.data.split(":")[2])
+    couple, user_id = await _uc(context, session)
+    await TaskService(session).delete_task(couple.id, user_id, task_id)
+    await reply_callback(callback, "Задача удалена.", back_to_menu_keyboard())
+
+
+async def _movie_by_callback(callback: CallbackQuery, context: Context, session: Any) -> tuple[Any, Any, int]:
+    parts = callback.data.split(":")
+    movie_id = callback_int(parts[2] if len(parts) > 2 and parts[1] in {"edit", "delete", "rate"} else parts[1])
+    couple, user_id = await _uc(context, session)
+    movie = await MovieService(session).get_movie(couple.id, user_id, movie_id)
+    return movie, couple, user_id
+
+
+def _movie_text(movie: Any) -> str:
+    watched = _fmt_dt(movie.watched_at) if getattr(movie, "watched_at", None) else "-"
+    return (
+        f"🎬 {movie.title} [{movie.status}]\n"
+        f"Жанр: {movie.type}\nПросмотр: {watched}\nID: {movie.id}"
+    )
+
+
+def _movie_markup(movie: Any) -> Any:
+    rows: list[list[tuple[str, str]]] = [
+        [("Редактировать", f"movie:edit:{movie.id}")],
+        [("Статус", f"movie:status_menu:{movie.id}")],
+        [("Оценить", f"movie:rate:{movie.id}")],
+    ]
+    for status in VALID_MOVIE_STATUSES:
+        if status != movie.status:
+            rows.append([(status, f"movie:status:{movie.id}:{status}")])
+    rows.append([("Удалить", f"movie:delete:{movie.id}"), ("Назад", "movies:list")])
+    return inline_keyboard(rows)
+
+
+@router.callback_query(lambda c: c.data == "movies:list")
+async def cb_movies_list(callback: CallbackQuery, context: Context, session: Any) -> None:
+    couple, user_id = await _uc(context, session)
+    items = await MovieService(session).get_all_movies(couple.id, user_id, limit=20)
+    await reply_callback(callback, _format_movies(items), _movie_list_keyboard(items))
+
+
+def _movie_list_keyboard(items: list[Any]) -> Any:
+    rows: list[list[tuple[str, str]]] = [[("Добавить", "movies:create")]]
+    rows += [[(item.title, f"movie:{item.id}")] for item in items]
+    return inline_keyboard(rows)
+
+
+@router.callback_query(lambda c: c.data == "movies:create")
+async def cb_movie_create_start(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
+    await _uc(context, session)
+    await state.set_data({"flow": "movie_create"})
+    await state.set_state(MovieCreateFSM.title)
+    await reply_callback(callback, "Введите название фильма/сериала:", cancel_keyboard())
+
+
+@router.message(MovieCreateFSM.title)
+async def msg_movie_title(message: Message, state: FSMContext) -> None:
+    text = _norm(message.text)
+    if not text:
+        await message.answer("Введите название.")
+        return
+    await state.update_data(title=text)
+    await state.set_state(MovieCreateFSM.description)
+    await message.answer("Описание:", reply_markup=optional_keyboard())
+
+
+@router.message(MovieCreateFSM.description)
+async def msg_movie_description(message: Message, context: Context, session: Any, state: FSMContext) -> None:
+    data = await state.get_data()
+    couple, user_id = await _uc(context, session)
+    description = None if _is_skip(message.text) else _norm(message.text)
+    try:
+        movie = await MovieService(session).add_movie(
+            couple.id, user_id, _norm(data.get("title")), description=description
+        )
+    except ValidationError as exc:
+        await message.answer(exc.message)
+        return
+    await state.clear()
+    await message.answer(f"Фильм добавлен: {movie.title}", reply_markup=_movie_markup(movie))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("movie:") and c.data.split(":")[1].isdigit())
+async def cb_movie_detail(callback: CallbackQuery, context: Context, session: Any) -> None:
+    movie, _, _ = await _movie_by_callback(callback, context, session)
+    await reply_callback(callback, _movie_text(movie), _movie_markup(movie))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("movie:edit:"))
+async def cb_movie_edit(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
+    movie, _, _ = await _movie_by_callback(callback, context, session)
+    await state.set_data({"flow": "movie_edit", "item_id": movie.id})
+    await state.set_state(MovieEditFSM.value)
+    await reply_callback(callback, "Введите новое значение:", _movie_edit_keyboard(movie.id))
+
+
+def _movie_edit_keyboard(movie_id: int) -> Any:
+    return inline_keyboard(
+        [
+            [("Заголовок", f"movie:field:{movie_id}:title"),
+             ("Описание", f"movie:field:{movie_id}:description")],
+            [("Назад", f"movie:{movie_id}")],
+        ]
+    )
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("movie:field:"))
+async def cb_movie_field(callback: CallbackQuery, state: FSMContext) -> None:
+    parts = callback.data.split(":")
+    await state.update_data(item_id=callback_int(parts[2]), field=parts[3])
+    await state.set_state(MovieEditFSM.value)
+    prompt = "Введите новое название:" if parts[3] == "title" else "Введите новое описание:"
+    keyboard = optional_keyboard() if parts[3] == "description" else cancel_keyboard()
+    await reply_callback(callback, prompt, keyboard)
+
+
+@router.message(MovieEditFSM.value)
+async def msg_movie_edit_value(message: Message, context: Context, session: Any, state: FSMContext) -> None:
+    data = await state.get_data()
+    field = data.get("field")
+    movie_id = callback_int(data.get("item_id"))
+    text = _norm(message.text)
+    couple, user_id = await _uc(context, session)
+    service = MovieService(session)
+    movie = await service.get_movie(couple.id, user_id, movie_id)
+    try:
+        if field == "title":
+            if not text:
+                await message.answer("Введите название.")
+                return
+            await service.update_movie(couple.id, user_id, movie_id, title=text)
+        elif field == "description":
+            await service.update_movie(couple.id, user_id, movie_id, description=(None if _is_skip(text) else text))
+        else:
+            await message.answer("Неизвестное поле.")
+            return
+    except ValidationError as exc:
+        await message.answer(exc.message)
+        return
+    await state.clear()
+    movie = await service.get_movie(couple.id, user_id, movie_id)
+    await message.answer(_movie_text(movie), reply_markup=_movie_markup(movie))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("movie:status:"))
+async def cb_movie_status(callback: CallbackQuery, context: Context, session: Any) -> None:
+    parts = callback.data.split(":")
+    movie_id = callback_int(parts[2])
+    new_status = parts[-1]
+    couple, user_id = await _uc(context, session)
+    movie = await MovieService(session).change_status(couple.id, user_id, movie_id, new_status)
+    await reply_callback(callback, _movie_text(movie), _movie_markup(movie))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("movie:status_menu:"))
+async def cb_movie_status_menu(callback: CallbackQuery, context: Context, session: Any) -> None:
+    movie_id = callback_int(callback.data.split(":")[2])
+    couple, user_id = await _uc(context, session)
+    movie = await MovieService(session).get_movie(couple.id, user_id, movie_id)
+    rows = [
+        [(status, f"movie:status:{movie.id}:{status}")]
+        for status in VALID_MOVIE_STATUSES
+        if status != movie.status
+    ]
+    rows.append([("Назад", f"movie:{movie.id}")])
+    await reply_callback(callback, "Выберите новый статус:", inline_keyboard(rows))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("movie:rate:"))
+async def cb_movie_rate(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
+    await state.set_data({"flow": "movie_rate", "item_id": callback_int(callback.data.split(":")[2])})
+    await state.set_state(MovieRatingFSM.rating)
+    await reply_callback(callback, "Введите оценку от 1 до 5:", cancel_keyboard())
+
+
+@router.message(MovieRatingFSM.rating)
+async def msg_movie_rating(message: Message, context: Context, session: Any, state: FSMContext) -> None:
+    data = await state.get_data()
+    movie_id = callback_int(data.get("item_id"))
+    text = _norm(message.text)
+    try:
+        rating = int(text)
+    except ValueError:
+        await message.answer("Введите число от 1 до 5.")
+        return
+    if not 1 <= rating <= 5:
+        await message.answer("Оценка должна быть от 1 до 5.")
+        return
+    couple, user_id = await _uc(context, session)
+    try:
+        await MovieService(session).rate_movie(couple.id, user_id, movie_id, rating)
+    except ValidationError as exc:
+        await message.answer(exc.message)
+        return
+    movie = await MovieService(session).get_movie(couple.id, user_id, movie_id)
+    await state.clear()
+    await message.answer(_movie_text(movie), reply_markup=_movie_markup(movie))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("movie:delete:"))
+async def cb_movie_delete(callback: CallbackQuery, context: Context, session: Any) -> None:
+    movie_id = callback_int(callback.data.split(":")[2])
+    couple, user_id = await _uc(context, session)
+    await MovieService(session).delete_movie(couple.id, user_id, movie_id)
+    await reply_callback(callback, "Фильм удалён.", back_to_menu_keyboard())
+
+
+async def _list_by_callback(callback: CallbackQuery, context: Context, session: Any) -> tuple[Any, Any, int]:
+    list_id = callback_int(callback.data.split(":")[1])
+    couple, user_id = await _uc(context, session)
+    lst = await ListService(session).get_list(couple.id, user_id, list_id)
+    return lst, couple, user_id
+
+
+@router.callback_query(lambda c: c.data == "lists:list")
+async def cb_lists_list(callback: CallbackQuery, context: Context, session: Any) -> None:
+    couple, user_id = await _uc(context, session)
+    items = await ListService(session).get_all_lists(couple.id, user_id, limit=20)
+    await reply_callback(callback, _format_lists(items), _list_list_keyboard(items))
+
+
+def _list_list_keyboard(items: list[Any]) -> Any:
+    rows: list[list[tuple[str, str]]] = [[("Добавить список", "lists:create")]]
+    rows += [[(item.name, f"list:{item.id}")] for item in items]
+    return inline_keyboard(rows)
+
+
+@router.callback_query(lambda c: c.data == "lists:create")
+async def cb_list_create_start(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
+    await _uc(context, session)
+    await state.set_state(ListCreateFSM.name)
+    await reply_callback(callback, "Введите название списка:", cancel_keyboard())
+
+
+@router.message(ListCreateFSM.name)
+async def msg_list_name(message: Message, context: Context, session: Any, state: FSMContext) -> None:
+    name = _norm(message.text)
+    if not name:
+        await message.answer("Введите название списка.")
+        return
+    couple, user_id = await _uc(context, session)
+    try:
+        lst = await ListService(session).create_list(couple.id, user_id, name)
+    except ValidationError as exc:
+        await message.answer(exc.message)
+        return
+    except IntegrityError:
+        await session.rollback()
+        await message.answer("Список с таким названием уже существует.", reply_markup=MAIN_MENU)
+        await state.clear()
+        return
+    await state.clear()
+    await message.answer(f"Список «{lst.name}» создан.", reply_markup=_list_detail_markup(lst))
+    await _render_list(callback_message=message, lst=lst, session=session, couple_id=couple.id, user_id=user_id)
+
+
+async def _render_list(callback_message: Any, lst: Any, session: Any, couple_id: int, user_id: int) -> None:
+    items = await ListService(session).get_items(couple_id, user_id, lst.id, include_completed=True)
+    text = f"Список «{lst.name}»:\n" + "\n".join(f"• {i.title}" for i in items)
+    await callback_message.answer(text, reply_markup=_list_detail_markup(lst))
+
+
+def _list_detail_markup(lst: Any) -> Any:
+    rows: list[list[tuple[str, str]]] = [
+        [("Добавить пункт", f"list:item:add:{lst.id}")],
+    ]
+    rows += [[(item.title, f"list:item:{item.id}")] for item in getattr(lst, "items", [])]
+    rows.append([("Удалить список", f"list:delete:{lst.id}"), ("Назад", "lists:list")])
+    return inline_keyboard(rows)
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("list:") and c.data.split(":")[1].isdigit())
+async def cb_list_detail(callback: CallbackQuery, context: Context, session: Any) -> None:
+    lst, couple, user_id = await _list_by_callback(callback, context, session)
+    await reply_callback(callback, f"Список «{lst.name}»", _list_detail_markup(lst))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("list:item:add:"))
+async def cb_list_item_add(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
+    list_id = callback_int(callback.data.split(":")[3])
+    await _uc(context, session)
+    await state.set_data({"flow": "list_item_create", "list_id": list_id})
+    await state.set_state(ListItemCreateFSM.title)
+    await reply_callback(callback, "Введите название пункта:", cancel_keyboard())
+
+
+@router.message(ListItemCreateFSM.title)
+async def msg_list_item_title(message: Message, context: Context, session: Any, state: FSMContext) -> None:
+    title = _norm(message.text)
+    if not title:
+        await message.answer("Введите название пункта.")
+        return
+    data = await state.get_data()
+    list_id = callback_int(data.get("list_id"))
+    couple, user_id = await _uc(context, session)
+    try:
+        item = await ListService(session).add_item(couple.id, user_id, list_id, title)
+    except ValidationError as exc:
+        await message.answer(exc.message)
+        return
+    await state.clear()
+    lst = await ListService(session).get_list(couple.id, user_id, list_id)
+    await message.answer(f"Пункт «{item.title}» добавлен.", reply_markup=_list_item_detail_markup(lst, item))
+
+
+def _list_item_detail_markup(lst: Any, item: Any) -> Any:
+    return inline_keyboard(
+        [
+            [("Выполнить/Отменить", f"list:item:toggle:{item.id}"),
+             ("Удалить", f"list:item:delete:{item.id}")],
+            [("Назад к списку", f"list:{lst.id}")],
+        ]
+    )
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("list:item:") and c.data.split(":")[2] == "toggle")
+async def cb_list_item_toggle(callback: CallbackQuery, context: Context, session: Any) -> None:
+    item_id = callback_int(callback.data.split(":")[3])
+    couple, user_id = await _uc(context, session)
+    service = ListService(session)
+    item = await service._item_repo.get_by_id(item_id)  # bypass; use item service? no direct method
+    if item is None:
+        await alert_callback(callback, "Пункт не найден.")
+        return
+    if item.completed_at is None:
+        await service.complete_item(couple.id, user_id, item.list_id, item_id)
+    else:
+        await service.uncomplete_item(couple.id, user_id, item.list_id, item_id)
+    lst = await service.get_list(couple.id, user_id, item.list_id)
+    item = await service._item_repo.get_by_id(item_id)
+    await reply_callback(callback, _item_text(item), _list_detail_markup(lst))
+
+
+def _item_text(item: Any) -> str:
+    status = "✅" if item.completed_at else "☐"
+    return f"{status} {item.title}"
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("list:item:") and c.data.split(":")[2].isdigit())
+async def cb_list_item_detail(callback: CallbackQuery, context: Context, session: Any) -> None:
+    item_id = callback_int(callback.data.split(":")[2])
+    couple, user_id = await _uc(context, session)
+    service = ListService(session)
+    item = await service._item_repo.get_by_id(item_id)
+    if item is None:
+        await alert_callback(callback, "Пункт не найден.")
+        return
+    lst = await service.get_list(couple.id, user_id, item.list_id)
+    await reply_callback(callback, _item_text(item), _list_item_detail_markup(lst, item))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("list:item:delete:"))
+async def cb_list_item_delete(callback: CallbackQuery, context: Context, session: Any) -> None:
+    item_id = callback_int(callback.data.split(":")[3])
+    couple, user_id = await _uc(context, session)
+    service = ListService(session)
+    item = await service._item_repo.get_by_id(item_id)
+    if item is None:
+        await alert_callback(callback, "Пункт не найден.")
+        return
+    await service.delete_item(couple.id, user_id, item.list_id, item_id)
+    lst = await service.get_list(couple.id, user_id, item.list_id)
+    await reply_callback(callback, "Пункт удалён.", _list_detail_markup(lst))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("list:delete:"))
+async def cb_list_delete(callback: CallbackQuery, context: Context, session: Any) -> None:
+    list_id = callback_int(callback.data.split(":")[2])
+    couple, user_id = await _uc(context, session)
+    await ListService(session).delete_list(couple.id, user_id, list_id)
+    await reply_callback(callback, "Список удалён.", back_to_menu_keyboard())
+
+
+async def _trip_by_callback(callback: CallbackQuery, context: Context, session: Any) -> tuple[Any, Any, int]:
+    trip_id = callback_int(callback.data.split(":")[1])
+    couple, user_id = await _uc(context, session)
+    trip = await TripService(session).get_trip(couple.id, user_id, trip_id)
+    return trip, couple, user_id
+
+
+def _trip_text(trip: Any) -> str:
+    lines = [f"✈️ {trip.name}"]
+    if trip.description:
+        lines.append(trip.description)
+    lines.append(f"Даты: {_fmt_dt(trip.start_date)} — {_fmt_dt(trip.end_date)}")
+    lines.append(f"ID: {trip.id}")
+    return "\n".join(lines)
+
+
+def _trip_detail_markup(trip: Any) -> Any:
+    rows: list[list[tuple[str, str]]] = [
+        [("Добавить место", f"trip:place:add:{trip.id}")],
+    ]
+    for place in getattr(trip, "places", []):
+        rows.append([(place.name, f"trip:place:{place.id}")])
+    rows.append([("Удалить путешествие", f"trip:delete:{trip.id}"), ("Назад", "trips:list")])
+    return inline_keyboard(rows)
+
+
+def _place_text(place: Any) -> str:
+    lines = [f"📍 {place.name}"]
+    if place.description:
+        lines.append(place.description)
+    if place.address:
+        lines.append(f"Адрес: {place.address}")
+    if place.url:
+        lines.append(f"Ссылка: {place.url}")
+    if place.visit_date:
+        lines.append(f"Дата: {_fmt_dt(place.visit_date)}")
+    lines.append(f"ID: {place.id}")
+    return "\n".join(lines)
+
+
+def _place_detail_markup(place: Any) -> Any:
+    return inline_keyboard(
+        [
+            [("Удалить место", f"trip:place:delete:{place.id}")],
+            [("Назад к путешествию", f"trip:{place.trip_id}")],
+        ]
+    )
+
+
+@router.callback_query(lambda c: c.data == "trips:list")
+async def cb_trips_list(callback: CallbackQuery, context: Context, session: Any) -> None:
+    couple, user_id = await _uc(context, session)
+    items = await TripService(session).get_all_trips(couple.id, user_id, limit=20)
+    rows = [[("Добавить путешествие", "trips:create")]]
+    rows += [[(i.name, f"trip:{i.id}")] for i in items]
+    await reply_callback(callback, _format_trips(items), inline_keyboard(rows))
+
+
+@router.callback_query(lambda c: c.data == "trips:create")
+async def cb_trip_create_start(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
+    await _uc(context, session)
+    await state.set_state(TripCreateFSM.title)
+    await reply_callback(callback, "Введите название путешествия:", cancel_keyboard())
+
+
+@router.message(TripCreateFSM.title)
+async def msg_trip_title(message: Message, state: FSMContext) -> None:
+    text = _norm(message.text)
+    if not text:
+        await message.answer("Введите название путешествия.")
+        return
+    await state.update_data(title=text)
+    await state.set_state(TripCreateFSM.description)
+    await message.answer("Описание:", reply_markup=optional_keyboard())
+
+
+@router.message(TripCreateFSM.description)
+async def msg_trip_description(message: Message, context: Context, session: Any, state: FSMContext) -> None:
+    data = await state.get_data()
+    couple, user_id = await _uc(context, session)
+    description = None if _is_skip(message.text) else _norm(message.text)
+    trip = await TripService(session).create_trip(
+        couple.id, user_id, _norm(data.get("title")), description=description
+    )
+    await state.clear()
+    await message.answer(f"Путешествие «{trip.name}» создано.", reply_markup=_trip_detail_markup(trip))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("trip:") and c.data.split(":")[1].isdigit())
+async def cb_trip_detail(callback: CallbackQuery, context: Context, session: Any) -> None:
+    trip, _, _ = await _trip_by_callback(callback, context, session)
+    await reply_callback(callback, _trip_text(trip), _trip_detail_markup(trip))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("trip:place:add:"))
+async def cb_trip_place_add(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
+    trip_id = callback_int(callback.data.split(":")[3])
+    await _uc(context, session)
+    await state.set_data({"flow": "place_create", "trip_id": trip_id})
+    await state.set_state(PlaceCreateFSM.title)
+    await reply_callback(callback, "Введите название места:", cancel_keyboard())
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("trip:place:") and c.data.split(":")[2].isdigit())
+async def cb_trip_place_detail(callback: CallbackQuery, context: Context, session: Any) -> None:
+    place_id = callback_int(callback.data.split(":")[2])
+    couple, user_id = await _uc(context, session)
+    trip_id = await _trip_id_from_place(session, place_id)
+    place = await PlaceService(session).get_place(couple.id, user_id, trip_id, place_id)
+    await reply_callback(callback, _place_text(place), _place_detail_markup(place))
+
+
+@router.message(PlaceCreateFSM.title)
+async def msg_place_title(message: Message, state: FSMContext) -> None:
+    text = _norm(message.text)
+    if not text:
+        await message.answer("Введите название места.")
+        return
+    await state.update_data(name=text)
+    await state.set_state(PlaceCreateFSM.description)
+    await message.answer("Описание:", reply_markup=optional_keyboard())
+
+
+@router.message(PlaceCreateFSM.description)
+async def msg_place_description(message: Message, context: Context, session: Any, state: FSMContext) -> None:
+    data = await state.get_data()
+    couple, user_id = await _uc(context, session)
+    trip_id = callback_int(data.get("trip_id"))
+    description = None if _is_skip(message.text) else _norm(message.text)
+    place = await PlaceService(session).add_place(
+        couple.id, user_id, trip_id, _norm(data.get("name")), description=description
+    )
+    await state.clear()
+    trip = await TripService(session).get_trip(couple.id, user_id, trip_id)
+    await message.answer(f"Место «{place.name}» добавлено.", reply_markup=_trip_detail_markup(trip))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("trip:place:delete:"))
+async def cb_trip_place_delete(callback: CallbackQuery, context: Context, session: Any) -> None:
+    place_id = callback_int(callback.data.split(":")[3])
+    couple, user_id = await _uc(context, session)
+    trip_id = await _trip_id_from_place(session, place_id)
+    await PlaceService(session).delete_place(couple.id, user_id, trip_id, place_id)
+    trip = await TripService(session).get_trip(couple.id, user_id, trip_id)
+    await reply_callback(callback, "Место удалено.", _trip_detail_markup(trip))
+
+
+async def _trip_id_from_place(session: Any, place_id: int) -> int:
+    place = await PlaceService(session)._place_repo.get_by_id(place_id)
+    if place is None:
+        raise ValidationError("Место не найдено", field="place_id")
+    return place.trip_id
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("trip:delete:"))
+async def cb_trip_delete(callback: CallbackQuery, context: Context, session: Any) -> None:
+    trip_id = callback_int(callback.data.split(":")[2])
+    couple, user_id = await _uc(context, session)
+    await TripService(session).delete_trip(couple.id, user_id, trip_id)
+    await reply_callback(callback, "Путешествие удалено.", back_to_menu_keyboard())
+
+
+async def _wish_by_callback(callback, context, session):
+    item_id = callback_int(callback.data.split(":")[1])
+    couple, user_id = await _uc(context, session)
+    item = await WishlistService(session).get_item(couple.id, user_id, item_id)
+    return item, couple, user_id
+
+
+def _wish_text(item: Any) -> str:
+    price = f" {item.price}₽" if getattr(item, "price", None) else ""
+    return f"🎁 {item.title} [{item.status}]{price}\nID: {item.id}"
+
+
+def _wish_markup(item: Any) -> Any:
+    rows: list[list[tuple[str, str]]] = []
+    for status in VALID_WISHLIST_STATUSES:
+        if status != item.status:
+            rows.append([(status, f"wish:status:{item.id}:{status}")])
+    rows.append([("Удалить", f"wish:delete:{item.id}"), ("Назад", "wishlist:list")])
+    return inline_keyboard(rows)
+
+
+@router.callback_query(lambda c: c.data == "wishlist:list")
+async def cb_wishlist_list(callback: CallbackQuery, context: Context, session: Any) -> None:
+    couple, user_id = await _uc(context, session)
+    items = await WishlistService(session).get_all_items(couple.id, user_id, limit=20)
+    rows: list[list[tuple[str, str]]] = [[("Добавить", "wishlist:create")]]
+    rows += [[(item.title, f"wish:{item.id}")] for item in items]
+    await reply_callback(callback, _format_wishlist(items), inline_keyboard(rows))
+
+
+@router.callback_query(lambda c: c.data == "wishlist:create")
+async def cb_wishlist_create_start(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
+    await _uc(context, session)
+    await state.set_state(WishlistCreateFSM.title)
+    await reply_callback(callback, "Введите название вишлиста:", cancel_keyboard())
+
+
+@router.message(WishlistCreateFSM.title)
+async def msg_wishlist_title(message: Message, state: FSMContext) -> None:
+    text = _norm(message.text)
+    if not text:
+        await message.answer("Введите название.")
+        return
+    await state.update_data(title=text)
+    await state.set_state(WishlistCreateFSM.url)
+    await message.answer("URL:", reply_markup=optional_keyboard())
+
+
+@router.message(WishlistCreateFSM.url)
+async def msg_wishlist_url(message: Message, context: Context, session: Any, state: FSMContext) -> None:
+    data = await state.get_data()
+    couple, user_id = await _uc(context, session)
+    url = None if _is_skip(message.text) else _norm(message.text)
+    try:
+        item = await WishlistService(session).add_item(
+            couple.id, user_id, _norm(data.get("title")), url=url
+        )
+    except ValidationError as exc:
+        await message.answer(exc.message)
+        return
+    await state.clear()
+    await message.answer(f"Добавлено: {item.title}", reply_markup=_wish_markup(item))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("wish:") and c.data.split(":")[1].isdigit())
+async def cb_wish_detail(callback: CallbackQuery, context: Context, session: Any) -> None:
+    item, _, _ = await _wish_by_callback(callback, context, session)
+    await reply_callback(callback, _wish_text(item), _wish_markup(item))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("wish:status:"))
+async def cb_wish_status(callback: CallbackQuery, context: Context, session: Any) -> None:
+    parts = callback.data.split(":")
+    item_id = callback_int(parts[2])
+    new_status = parts[-1]
+    couple, user_id = await _uc(context, session)
+    item = await WishlistService(session).change_status(couple.id, user_id, item_id, new_status)
+    await reply_callback(callback, _wish_text(item), _wish_markup(item))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("wish:delete:"))
+async def cb_wish_delete(callback: CallbackQuery, context: Context, session: Any) -> None:
+    item_id = callback_int(callback.data.split(":")[2])
+    couple, user_id = await _uc(context, session)
+    await WishlistService(session).delete_item(couple.id, user_id, item_id)
+    await reply_callback(callback, "Удалено.", back_to_menu_keyboard())
+
+
+async def _note_by_callback(callback, context, session):
+    parts = callback.data.split(":")
+    note_id = callback_int(parts[2] if len(parts) > 2 and parts[1] in {"edit", "delete"} else parts[1])
+    couple, user_id = await _uc(context, session)
+    note = await NoteService(session).get_note(couple.id, user_id, note_id)
+    return note, couple, user_id
+
+
+def _note_markup(note: Any) -> Any:
+    return inline_keyboard(
+        [
+            [("Редактировать", f"note:edit:{note.id}")],
+            [("Удалить", f"note:delete:{note.id}"), ("Назад", "notes:list")],
+        ]
+    )
+
+
+@router.callback_query(lambda c: c.data == "notes:list")
+async def cb_notes_list(callback: CallbackQuery, context: Context, session: Any) -> None:
+    couple, user_id = await _uc(context, session)
+    items = await NoteService(session).get_all_notes(couple.id, user_id, limit=20)
+    rows: list[list[tuple[str, str]]] = [[("Добавить заметку", "notes:create")]]
+    rows += [[(item.title, f"note:{item.id}")] for item in items]
+    await reply_callback(callback, _format_notes(items), inline_keyboard(rows))
+
+
+@router.callback_query(lambda c: c.data == "notes:create")
+async def cb_note_create_start(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
+    await _uc(context, session)
+    await state.set_state(NoteCreateFSM.title)
+    await reply_callback(callback, "Введите заголовок заметки:", cancel_keyboard())
+
+
+@router.message(NoteCreateFSM.title)
+async def msg_note_title(message: Message, state: FSMContext) -> None:
+    text = _norm(message.text)
+    if not text:
+        await message.answer("Введите заголовок.")
+        return
+    await state.update_data(title=text)
+    await state.set_state(NoteCreateFSM.content)
+    await message.answer("Содержимое:", reply_markup=optional_keyboard())
+
+
+@router.message(NoteCreateFSM.content)
+async def msg_note_content(message: Message, context: Context, session: Any, state: FSMContext) -> None:
+    data = await state.get_data()
+    couple, user_id = await _uc(context, session)
+    content = None if _is_skip(message.text) else _norm(message.text)
+    note = await NoteService(session).create_note(couple.id, user_id, _norm(data.get("title")), content=content)
+    await state.clear()
+    await message.answer(f"Заметка «{note.title}» создана.", reply_markup=_note_markup(note))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("note:") and c.data.split(":")[1].isdigit())
+async def cb_note_detail(callback: CallbackQuery, context: Context, session: Any) -> None:
+    note, _, _ = await _note_by_callback(callback, context, session)
+    await reply_callback(
+        callback,
+        f"📝 {note.title}\n{note.content or ''}",
+        _note_markup(note),
+    )
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("note:edit:"))
+async def cb_note_edit(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
+    note, _, _ = await _note_by_callback(callback, context, session)
+    await state.set_data({"flow": "note_edit", "item_id": note.id, "field": "title", "edit": True})
+    await state.set_state(NoteEditFSM.value)
+    await reply_callback(callback, "Введите новое название:", _note_edit_keyboard(note.id))
+
+
+def _note_edit_keyboard(note_id: int) -> Any:
+    return inline_keyboard(
+        [
+            [("Заголовок", f"note:field:{note_id}:title"),
+             ("Содержимое", f"note:field:{note_id}:content")],
+            [("Назад", f"note:{note_id}")],
+        ]
+    )
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("note:field:"))
+async def cb_note_field(callback: CallbackQuery, state: FSMContext) -> None:
+    parts = callback.data.split(":")
+    await state.update_data(item_id=callback_int(parts[2]), field=parts[3])
+    await state.set_state(NoteEditFSM.value)
+    prompt = "Введите новое название:" if parts[3] == "title" else "Введите новое содержимое:"
+    keyboard = optional_keyboard() if parts[3] == "content" else cancel_keyboard()
+    await reply_callback(callback, prompt, keyboard)
+
+
+@router.message(NoteEditFSM.value)
+async def msg_note_edit_value(message: Message, context: Context, session: Any, state: FSMContext) -> None:
+    data = await state.get_data()
+    field = data.get("field")
+    note_id = callback_int(data.get("item_id"))
+    text = _norm(message.text)
+    couple, user_id = await _uc(context, session)
+    service = NoteService(session)
+    if field == "title":
+        if not text:
+            await message.answer("Введите заголовок.")
+            return
+        note = await service.update_note(couple.id, user_id, note_id, title=text)
+    elif field == "content":
+        content = None if _is_skip(text) else text
+        note = await service.update_note(couple.id, user_id, note_id, content=content)
+    else:
+        await message.answer("Неизвестное поле.")
+        return
+    await state.clear()
+    await message.answer(f"📝 {note.title}\n{note.content or ''}", reply_markup=_note_markup(note))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("note:delete:"))
+async def cb_note_delete(callback: CallbackQuery, context: Context, session: Any) -> None:
+    note_id = callback_int(callback.data.split(":")[2])
+    couple, user_id = await _uc(context, session)
+    await NoteService(session).delete_note(couple.id, user_id, note_id)
+    await reply_callback(callback, "Заметка удалена.", back_to_menu_keyboard())
+
+
+@router.callback_query(lambda c: c.data == "settings:display")
+async def cb_settings_display(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
+    await _uc(context, session)
+    await state.set_state(SettingsDisplayFSM.display_name)
+    await reply_callback(callback, "Введите новое имя:", cancel_keyboard())
+
+
+@router.message(SettingsDisplayFSM.display_name)
+async def msg_settings_display(message: Message, context: Context, session: Any, state: FSMContext) -> None:
+    name = _norm(message.text)
+    if not name:
+        await message.answer("Введите имя.")
+        return
+    user_id = require_user_id(context)
+    try:
+        await SettingsService(session).update_user_display_name(user_id, name)
+    except ValidationError as exc:
+        await message.answer(exc.message)
+        return
+    await state.clear()
+    await message.answer("Имя сохранено.", reply_markup=MAIN_MENU)
+
+
+@router.callback_query(lambda c: c.data == "settings:timezone")
+async def cb_settings_timezone(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
+    await _uc(context, session)
+    await state.set_state(SettingsTimezoneFSM.timezone)
+    await reply_callback(callback, "Введите IANA-часовой пояс (например, Europe/Moscow):", cancel_keyboard())
+
+
+@router.message(SettingsTimezoneFSM.timezone)
+async def msg_settings_timezone(message: Message, context: Context, session: Any, state: FSMContext) -> None:
+    tz = _norm(message.text)
+    if not tz:
+        await message.answer("Введите часовой пояс.")
+        return
+    user_id = require_user_id(context)
+    try:
+        await SettingsService(session).set_user_timezone(user_id, tz)
+    except ValidationError as exc:
+        await message.answer(exc.message)
+        return
+    await state.clear()
+    await message.answer("Часовой пояс сохранён.", reply_markup=MAIN_MENU)
+
+
+@router.callback_query(lambda c: c.data == "settings:couple")
+async def cb_settings_couple(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
+    await _uc(context, session)
+    await state.set_state(CoupleNameFSM.name)
+    await reply_callback(callback, "Введите имя пары:", cancel_keyboard())
+
+
+@router.message(CoupleNameFSM.name)
+async def msg_settings_couple(message: Message, context: Context, session: Any, state: FSMContext) -> None:
+    name = _norm(message.text)
+    if not name:
+        await message.answer("Введите имя.")
+        return
+    couple, user_id = await _uc(context, session)
+    try:
+        await CoupleService(session).update_couple_name(couple.id, user_id, name)
+    except ValidationError as exc:
+        await message.answer(exc.message)
+        return
+    await state.clear()
+    await message.answer("Имя пары сохранено.", reply_markup=MAIN_MENU)
