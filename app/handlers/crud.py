@@ -46,7 +46,7 @@ from app.handlers.sections import (
     pagination_row,
 )
 from app.handlers.start import MAIN_MENU
-from app.repositories.users import UserRepository
+from app.repositories.users import CoupleMemberRepository, UserRepository
 from app.services.challenge_service import ChallengeService
 from app.services.couple_service import CoupleService
 from app.services.list_service import ListService
@@ -177,7 +177,7 @@ def _task_detail_markup(task: Any) -> Any:
     ]
     for status in TASK_STATUS_TRANSITIONS.get(task.status, []):
         rows.append([(TASK_STATUS_LABEL[status], f"task:status:{task.id}:{status}")])
-    rows.append([("Удалить", f"task:delete:{task.id}"), ("Назад", "tasks:list")])
+    rows.append([("Удалить", f"task:delete:{task.id}"), ("↩️ К задачам", "tasks:list")])
     return inline_keyboard(rows)
 
 
@@ -314,13 +314,13 @@ async def msg_task_due_at(message: Message, state: FSMContext) -> None:
     created_by = data.get("created_by")
     if assigned_to and assigned_to != created_by:
         rows = [
-            [("Создать и уведомить", "task:create:confirm:notify")],
+            [("➕ Создать и уведомить", "task:create:confirm:notify")],
             [("Без уведомления", "task:create:confirm:silent")],
             [("Отмена", "task:create:cancel")],
         ]
     else:
         rows = [
-            [("Создать", "task:create:confirm:silent")],
+            [("➕ Создать задачу", "task:create:confirm:silent")],
             [("Отмена", "task:create:cancel")],
         ]
     await message.answer(summary, reply_markup=inline_keyboard(rows))
@@ -332,7 +332,7 @@ def _build_task_summary(data: dict) -> str:
     if assigned:
         assigned_label = f"id={assigned}"
     return (
-        "Создать задачу:\n"
+        "✅ Новая задача\n"
         f"Название: {data.get('title')}\n"
         f"Описание: {data.get('description') or '-'}\n"
         f"Приоритет: {data.get('priority', 'NORMAL')}\n"
@@ -422,7 +422,7 @@ async def cb_task_edit(callback: CallbackQuery, context: Context, session: Any, 
                  ("Описание", f"task:field:{task.id}:description")],
                 [("Приоритет", f"task:field:{task.id}:priority"),
                  ("Дедлайн", f"task:field:{task.id}:due_at")],
-                [("Назад", f"task:{task.id}")],
+                [("↩️ Назад", f"task:{task.id}")],
             ]
         ),
     )
@@ -538,13 +538,13 @@ def _movie_text(movie: Any) -> str:
 def _movie_markup(movie: Any) -> Any:
     rows: list[list[tuple[str, str]]] = [
         [("Редактировать", f"movie:edit:{movie.id}")],
-        [("Статус", f"movie:status_menu:{movie.id}")],
-        [("Оценить", f"movie:rate:{movie.id}")],
+        [("🔄 Изменить статус", f"movie:status_menu:{movie.id}")],
+        [("⭐ Оценить", f"movie:rate:{movie.id}")],
     ]
     for status in VALID_MOVIE_STATUSES:
         if status != movie.status:
             rows.append([(status, f"movie:status:{movie.id}:{status}")])
-    rows.append([("Удалить", f"movie:delete:{movie.id}"), ("Назад", "movies:list")])
+    rows.append([("Удалить", f"movie:delete:{movie.id}"), ("↩️ К кино", "movies:list")])
     return inline_keyboard(rows)
 
 
@@ -565,10 +565,10 @@ async def cb_movies_list(callback: CallbackQuery, context: Context, session: Any
 def _movie_list_keyboard(
     items: list[Any], page: int = 0, page_count: int = 1
 ) -> Any:
-    rows: list[list[tuple[str, str]]] = [[("Добавить", "movies:create")]]
-    rows += [[(item.title, f"movie:{item.id}")] for item in items]
+    rows: list[list[tuple[str, str]]] = [[(item.title, f"movie:{item.id}")] for item in items]
     if nav := pagination_row("movies:list", page, page_count):
         rows.append(nav)
+    rows.append([("➕ Новый фильм", "movies:create")])
     return inline_keyboard(rows)
 
 
@@ -626,7 +626,7 @@ def _movie_edit_keyboard(movie_id: int) -> Any:
         [
             [("Заголовок", f"movie:field:{movie_id}:title"),
              ("Описание", f"movie:field:{movie_id}:description")],
-            [("Назад", f"movie:{movie_id}")],
+            [("↩️ Назад", f"movie:{movie_id}")],
         ]
     )
 
@@ -689,7 +689,7 @@ async def cb_movie_status_menu(callback: CallbackQuery, context: Context, sessio
         for status in VALID_MOVIE_STATUSES
         if status != movie.status
     ]
-    rows.append([("Назад", f"movie:{movie.id}")])
+    rows.append([("↩️ Назад", f"movie:{movie.id}")])
     await reply_callback(callback, "Выберите новый статус:", inline_keyboard(rows))
 
 
@@ -756,10 +756,10 @@ async def cb_lists_list(callback: CallbackQuery, context: Context, session: Any)
 def _list_list_keyboard(
     items: list[Any], page: int = 0, page_count: int = 1
 ) -> Any:
-    rows: list[list[tuple[str, str]]] = [[("Добавить список", "lists:create")]]
-    rows += [[(item.name, f"list:{item.id}")] for item in items]
+    rows: list[list[tuple[str, str]]] = [[(item.name, f"list:{item.id}")] for item in items]
     if nav := pagination_row("lists:list", page, page_count):
         rows.append(nav)
+    rows.append([("➕ Новый список", "lists:create")])
     return inline_keyboard(rows)
 
 
@@ -800,10 +800,10 @@ async def _render_list(callback_message: Any, lst: Any, session: Any, couple_id:
 
 def _list_detail_markup(lst: Any) -> Any:
     rows: list[list[tuple[str, str]]] = [
-        [("Добавить пункт", f"list:item:add:{lst.id}")],
+        [("➕ Новый пункт", f"list:item:add:{lst.id}")],
     ]
     rows += [[(item.title, f"list:item:{item.id}")] for item in getattr(lst, "items", [])]
-    rows.append([("Удалить список", f"list:delete:{lst.id}"), ("Назад", "lists:list")])
+    rows.append([("Удалить список", f"list:delete:{lst.id}"), ("↩️ К спискам", "lists:list")])
     return inline_keyboard(rows)
 
 
@@ -846,7 +846,7 @@ def _list_item_detail_markup(lst: Any, item: Any) -> Any:
         [
             [("Выполнить/Отменить", f"list:item:toggle:{item.id}"),
              ("Удалить", f"list:item:delete:{item.id}")],
-            [("Назад к списку", f"list:{lst.id}")],
+            [("↩️ К списку", f"list:{lst.id}")],
         ]
     )
 
@@ -927,11 +927,11 @@ def _trip_text(trip: Any) -> str:
 
 def _trip_detail_markup(trip: Any) -> Any:
     rows: list[list[tuple[str, str]]] = [
-        [("Добавить место", f"trip:place:add:{trip.id}")],
+        [("➕ Новое место", f"trip:place:add:{trip.id}")],
     ]
     for place in getattr(trip, "places", []):
         rows.append([(place.name, f"trip:place:{place.id}")])
-    rows.append([("Удалить путешествие", f"trip:delete:{trip.id}"), ("Назад", "trips:list")])
+    rows.append([("Удалить путешествие", f"trip:delete:{trip.id}"), ("↩️ К путешествиям", "trips:list")])
     return inline_keyboard(rows)
 
 
@@ -953,7 +953,7 @@ def _place_detail_markup(place: Any) -> Any:
     return inline_keyboard(
         [
             [("Удалить место", f"trip:place:delete:{place.id}")],
-            [("Назад к путешествию", f"trip:{place.trip_id}")],
+            [("↩️ К путешествию", f"trip:{place.trip_id}")],
         ]
     )
 
@@ -965,10 +965,10 @@ async def cb_trips_list(callback: CallbackQuery, context: Context, session: Any)
     items, page, page_count = paginate(
         all_items, _callback_page(callback, "trips:list")
     )
-    rows = [[("Добавить путешествие", "trips:create")]]
-    rows += [[(i.name, f"trip:{i.id}")] for i in items]
+    rows = [[(i.name, f"trip:{i.id}")] for i in items]
     if nav := pagination_row("trips:list", page, page_count):
         rows.append(nav)
+    rows.append([("➕ Новое путешествие", "trips:create")])
     await reply_callback(callback, _format_trips(items), inline_keyboard(rows))
 
 
@@ -1099,7 +1099,7 @@ def _wish_markup(item: Any) -> Any:
     for status in VALID_WISHLIST_STATUSES:
         if status != item.status:
             rows.append([(status, f"wish:status:{item.id}:{status}")])
-    rows.append([("Удалить", f"wish:delete:{item.id}"), ("Назад", "wishlist:list")])
+    rows.append([("Удалить", f"wish:delete:{item.id}"), ("↩️ К вишлисту", "wishlist:list")])
     return inline_keyboard(rows)
 
 
@@ -1110,10 +1110,10 @@ async def cb_wishlist_list(callback: CallbackQuery, context: Context, session: A
     items, page, page_count = paginate(
         all_items, _callback_page(callback, "wishlist:list")
     )
-    rows: list[list[tuple[str, str]]] = [[("Добавить", "wishlist:create")]]
-    rows += [[(item.title, f"wish:{item.id}")] for item in items]
+    rows: list[list[tuple[str, str]]] = [[(item.title, f"wish:{item.id}")] for item in items]
     if nav := pagination_row("wishlist:list", page, page_count):
         rows.append(nav)
+    rows.append([("➕ Новое желание", "wishlist:create")])
     await reply_callback(callback, _format_wishlist(items), inline_keyboard(rows))
 
 
@@ -1187,7 +1187,7 @@ def _note_markup(note: Any) -> Any:
     return inline_keyboard(
         [
             [("Редактировать", f"note:edit:{note.id}")],
-            [("Удалить", f"note:delete:{note.id}"), ("Назад", "notes:list")],
+            [("Удалить", f"note:delete:{note.id}"), ("↩️ К заметкам", "notes:list")],
         ]
     )
 
@@ -1199,10 +1199,10 @@ async def cb_notes_list(callback: CallbackQuery, context: Context, session: Any)
     items, page, page_count = paginate(
         all_items, _callback_page(callback, "notes:list")
     )
-    rows: list[list[tuple[str, str]]] = [[("Добавить заметку", "notes:create")]]
-    rows += [[(item.title, f"note:{item.id}")] for item in items]
+    rows: list[list[tuple[str, str]]] = [[(item.title, f"note:{item.id}")] for item in items]
     if nav := pagination_row("notes:list", page, page_count):
         rows.append(nav)
+    rows.append([("➕ Новая заметка", "notes:create")])
     await reply_callback(callback, _format_notes(items), inline_keyboard(rows))
 
 
@@ -1257,7 +1257,7 @@ def _note_edit_keyboard(note_id: int) -> Any:
         [
             [("Заголовок", f"note:field:{note_id}:title"),
              ("Содержимое", f"note:field:{note_id}:content")],
-            [("Назад", f"note:{note_id}")],
+            [("↩️ Назад", f"note:{note_id}")],
         ]
     )
 
@@ -1303,8 +1303,8 @@ async def cb_note_delete(callback: CallbackQuery, context: Context, session: Any
     await reply_callback(callback, "Заметка удалена.", back_to_menu_keyboard())
 
 
-CHALLENGE_SCOPE_LABELS = {"PERSONAL": "Личный", "COUPLE": "Вместе"}
-CHALLENGE_TYPE_LABELS = {"SIMPLE": "Обычный", "SAVINGS": "С экономией"}
+CHALLENGE_SCOPE_LABELS = {"PERSONAL": "Только я", "COUPLE": "Мы вместе"}
+CHALLENGE_TYPE_LABELS = {"SIMPLE": "Выполнение", "SAVINGS": "Экономия денег"}
 
 
 def _money(value: Decimal | None) -> str:
@@ -1342,6 +1342,13 @@ def _user_name(user: Any | None, fallback: str) -> str:
     return user.display_name or user.first_name or user.username or fallback
 
 
+def _participant_daily_amount(challenge: Any, user_id: int) -> Decimal:
+    for participant in challenge.participants:
+        if participant.user_id == user_id:
+            return participant.daily_amount or challenge.daily_amount or Decimal("0.00")
+    return challenge.daily_amount or Decimal("0.00")
+
+
 def _challenge_entry(challenge: Any, user_id: int, entry_date: date) -> Any | None:
     for entry in challenge.entries:
         if entry.user_id == user_id and entry.entry_date == entry_date:
@@ -1353,15 +1360,31 @@ def _challenge_status_label(entry: Any | None) -> str:
     if entry is None:
         return "нет отметки"
     if entry.status == "SUCCESS":
-        return "получилось"
-    return "не получилось"
+        return "выполнено"
+    return "пропуск"
+
+
+def _challenge_icon(challenge: Any) -> str:
+    return "💰" if challenge.challenge_type == "SAVINGS" else "🎯"
+
+
+def _challenge_success_label(challenge: Any, day: str) -> str:
+    if challenge.challenge_type == "SAVINGS":
+        return f"✅ Не покупал {day}"
+    return f"✅ Выполнено {day}"
+
+
+def _challenge_missed_label(challenge: Any, day: str) -> str:
+    if challenge.challenge_type == "SAVINGS":
+        return f"☕ Купил {day}"
+    return f"✖️ Пропуск {day}"
 
 
 def _challenge_text(challenge: Any, viewer_id: int, today: date) -> str:
     participant_by_id = {participant.user_id: participant for participant in challenge.participants}
     today_entry = _challenge_entry(challenge, viewer_id, today)
     lines = [
-        challenge.title,
+        f"{_challenge_icon(challenge)} {challenge.title}",
         f"{challenge.start_date.strftime('%d.%m')}–{challenge.end_date.strftime('%d.%m')}",
         f"Сегодня: {_challenge_status_label(today_entry)}",
         "",
@@ -1372,6 +1395,8 @@ def _challenge_text(challenge: Any, viewer_id: int, today: date) -> str:
     for participant in visible_participants:
         name = _user_name(participant.user, str(participant.user_id))
         lines.append(f"{name}:")
+        if challenge.challenge_type == "SAVINGS":
+            lines.append(f"План: {_money(_participant_daily_amount(challenge, participant.user_id))} в день")
         lines.append(_challenge_progress(challenge, participant.user_id, today))
         lines.append("")
     if challenge.challenge_type == "SAVINGS":
@@ -1391,7 +1416,6 @@ def _challenge_detail_markup(
     show_today_prompt: bool = True,
 ) -> Any:
     rows: list[list[tuple[str, str]]] = []
-    rows.append([("Статус", f"chl:status:{challenge.id}")])
     if (
         show_today_prompt
         and challenge.start_date <= today <= challenge.end_date
@@ -1399,8 +1423,8 @@ def _challenge_detail_markup(
     ):
         rows.extend(
             [
-                [("Сегодня получилось", f"chl:ok:{challenge.id}")],
-                [("Сегодня не получилось", f"chl:miss:{challenge.id}")],
+                [(_challenge_success_label(challenge, "сегодня"), f"chl:ok:{challenge.id}")],
+                [(_challenge_missed_label(challenge, "сегодня"), f"chl:miss:{challenge.id}")],
             ]
         )
     yesterday = today - timedelta(days=1)
@@ -1410,26 +1434,71 @@ def _challenge_detail_markup(
     ):
         rows.append(
             [
-                ("Вчера получилось", f"chl:yok:{challenge.id}"),
-                ("Вчера нет", f"chl:ymiss:{challenge.id}"),
+                (_challenge_success_label(challenge, "вчера"), f"chl:yok:{challenge.id}"),
+                (_challenge_missed_label(challenge, "вчера"), f"chl:ymiss:{challenge.id}"),
             ]
         )
-    rows.append([("Назад", "challenges:list")])
+    rows.append([("🔄 Обновить", f"chl:status:{challenge.id}")])
+    rows.append([("↩️ К челленджам", "challenges:list")])
     return inline_keyboard(rows)
 
 
 def _challenge_summary(data: dict[str, Any]) -> str:
     lines = [
-        "Создать челлендж:",
+        "🎯 Новый челлендж",
         f"Название: {data.get('title')}",
-        f"Формат: {CHALLENGE_SCOPE_LABELS.get(data.get('scope'), '-')}",
-        f"Тип: {CHALLENGE_TYPE_LABELS.get(data.get('challenge_type'), '-')}",
+        f"Участники: {CHALLENGE_SCOPE_LABELS.get(data.get('scope'), '-')}",
+        f"Что отслеживаем: {CHALLENGE_TYPE_LABELS.get(data.get('challenge_type'), '-')}",
         f"Начало: {data.get('start_date')}",
         f"Окончание: {data.get('end_date')}",
     ]
     if data.get("challenge_type") == "SAVINGS":
-        lines.append(f"Сумма в день: {_money(Decimal(data.get('daily_amount', '0')))}")
+        participant_plans = data.get("participant_plans") or []
+        participant_amounts = data.get("participant_amounts") or {}
+        if participant_plans:
+            lines.append("План на день:")
+            for participant in participant_plans:
+                user_id = participant["user_id"]
+                amount = participant_amounts.get(user_id) or participant_amounts.get(str(user_id))
+                lines.append(f"- {participant['name']}: {_money(Decimal(str(amount or '0')))}")
     return "\n".join(lines)
+
+
+async def _challenge_participant_plans(context: Context, session: Any, scope: str) -> list[dict[str, Any]]:
+    couple, user_id = await _uc(context, session)
+    members = await CoupleMemberRepository(session).get_members(couple.id)
+    if scope == "PERSONAL":
+        members = [member for member in members if member.user_id == user_id]
+    plans = []
+    for member in members:
+        plans.append(
+            {
+                "user_id": member.user_id,
+                "name": _user_name(member.user, str(member.user_id)),
+            }
+        )
+    return plans
+
+
+async def _ask_next_challenge_amount(event: CallbackQuery | Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    participant_plans = data.get("participant_plans") or []
+    index = int(data.get("participant_amount_index", 0))
+    if index >= len(participant_plans):
+        await state.set_state(ChallengeCreateFSM.confirm)
+        text = _challenge_summary(data)
+        markup = inline_keyboard([[("➕ Создать челлендж", "chl:new:confirm")], [("Отмена", "chl:new:cancel")]])
+        if isinstance(event, CallbackQuery):
+            await reply_callback(event, text, markup)
+        else:
+            await event.answer(text, reply_markup=markup)
+        return
+    name = participant_plans[index]["name"]
+    text = f"План трат для {name} в день? Например: 300"
+    if isinstance(event, CallbackQuery):
+        await reply_callback(event, text, cancel_keyboard())
+    else:
+        await event.answer(text, reply_markup=cancel_keyboard())
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("challenges:list"))
@@ -1441,7 +1510,7 @@ async def cb_challenges_list(callback: CallbackQuery, context: Context, session:
     )
     await reply_callback(
         callback,
-        _format_challenges(items),
+        _format_challenges(items, user_id),
         _challenge_list_keyboard(items, page, page_count),
     )
 
@@ -1451,7 +1520,7 @@ async def cb_challenge_create_start(callback: CallbackQuery, context: Context, s
     await _uc(context, session)
     await state.set_data({"flow": "challenge_create"})
     await state.set_state(ChallengeCreateFSM.title)
-    await reply_callback(callback, "Введите название челленджа:", cancel_keyboard())
+    await reply_callback(callback, "Название челленджа:", cancel_keyboard())
 
 
 @router.message(ChallengeCreateFSM.title)
@@ -1463,23 +1532,24 @@ async def msg_challenge_title(message: Message, state: FSMContext) -> None:
     await state.update_data(title=text)
     await state.set_state(ChallengeCreateFSM.scope)
     await message.answer(
-        "Для кого челлендж?",
+        "Кто участвует в челлендже?",
         reply_markup=inline_keyboard(
-            [[("Личный", "chl:new:scope:PERSONAL"), ("Вместе", "chl:new:scope:COUPLE")]]
+            [[("👤 Только я", "chl:new:scope:PERSONAL"), ("👥 Мы вместе", "chl:new:scope:COUPLE")]]
         ),
     )
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("chl:new:scope:"))
-async def cb_challenge_scope(callback: CallbackQuery, state: FSMContext) -> None:
+async def cb_challenge_scope(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
     scope = callback.data.split(":")[-1]
-    await state.update_data(scope=scope)
+    participant_plans = await _challenge_participant_plans(context, session, scope)
+    await state.update_data(scope=scope, participant_plans=participant_plans)
     await state.set_state(ChallengeCreateFSM.challenge_type)
     await reply_callback(
         callback,
-        "Тип челленджа:",
+        "Что отслеживаем?",
         inline_keyboard(
-            [[("Обычный", "chl:new:type:SIMPLE"), ("С экономией", "chl:new:type:SAVINGS")]]
+            [[("✅ Выполнение", "chl:new:type:SIMPLE"), ("💰 Экономию денег", "chl:new:type:SAVINGS")]]
         ),
     )
 
@@ -1492,7 +1562,7 @@ async def cb_challenge_type(callback: CallbackQuery, state: FSMContext) -> None:
     await reply_callback(
         callback,
         "Дата начала (дд.мм.гггг):",
-        inline_keyboard([[("Сегодня", "chl:new:start:today")]]),
+        inline_keyboard([[("📅 Сегодня", "chl:new:start:today")]]),
     )
 
 
@@ -1530,13 +1600,14 @@ async def msg_challenge_end_date(message: Message, state: FSMContext) -> None:
     await state.update_data(end_date=end.isoformat())
     if data.get("challenge_type") == "SAVINGS":
         await state.set_state(ChallengeCreateFSM.daily_amount)
-        await message.answer("Сколько обычно тратится в день? Например: 300", reply_markup=cancel_keyboard())
+        await state.update_data(participant_amounts={}, participant_amount_index=0)
+        await _ask_next_challenge_amount(message, state)
         return
     data = await state.get_data()
     await state.set_state(ChallengeCreateFSM.confirm)
     await message.answer(
         _challenge_summary(data),
-        reply_markup=inline_keyboard([[("Создать", "chl:new:confirm")], [("Отмена", "chl:new:cancel")]]),
+        reply_markup=inline_keyboard([[("➕ Создать челлендж", "chl:new:confirm")], [("Отмена", "chl:new:cancel")]]),
     )
 
 
@@ -1550,19 +1621,33 @@ async def msg_challenge_daily_amount(message: Message, state: FSMContext) -> Non
     if amount is None:
         await message.answer("Введите сумму на день.")
         return
-    await state.update_data(daily_amount=str(amount))
     data = await state.get_data()
-    await state.set_state(ChallengeCreateFSM.confirm)
-    await message.answer(
-        _challenge_summary(data),
-        reply_markup=inline_keyboard([[("Создать", "chl:new:confirm")], [("Отмена", "chl:new:cancel")]]),
+    participant_plans = data.get("participant_plans") or []
+    index = int(data.get("participant_amount_index", 0))
+    participant_amounts = data.get("participant_amounts") or {}
+    if index >= len(participant_plans):
+        await message.answer("Все суммы уже указаны.")
+        await _ask_next_challenge_amount(message, state)
+        return
+    participant = participant_plans[index]
+    participant_amounts[participant["user_id"]] = str(amount)
+    await state.update_data(
+        participant_amounts=participant_amounts,
+        participant_amount_index=index + 1,
     )
+    await _ask_next_challenge_amount(message, state)
 
 
 @router.callback_query(lambda c: c.data == "chl:new:cancel")
-async def cb_challenge_create_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+async def cb_challenge_create_cancel(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
     await state.clear()
-    await reply_callback(callback, "Отменено.", MAIN_MENU)
+    couple, user_id = await _uc(context, session)
+    items = await ChallengeService(session).list_challenges(couple.id, user_id)
+    await reply_callback(
+        callback,
+        "Создание отменено.\n\n" + _format_challenges(items, user_id),
+        _challenge_list_keyboard(items),
+    )
 
 
 @router.callback_query(lambda c: c.data == "chl:new:confirm")
@@ -1583,7 +1668,10 @@ async def cb_challenge_create_confirm(callback: CallbackQuery, context: Context,
             challenge_type=data.get("challenge_type"),
             start_date=date.fromisoformat(data["start_date"]),
             end_date=date.fromisoformat(data["end_date"]),
-            daily_amount=Decimal(data["daily_amount"]) if data.get("daily_amount") else None,
+            participant_daily_amounts={
+                int(user_id): Decimal(str(amount))
+                for user_id, amount in (data.get("participant_amounts") or {}).items()
+            },
         )
     except ValidationError as exc:
         await alert_callback(callback, exc.message)
@@ -1613,7 +1701,7 @@ async def _notify_challenge_partners(callback: CallbackQuery, challenge: Any, cr
             await callback.bot.send_message(
                 participant.user.telegram_id,
                 f"Появился общий челлендж: {challenge.title}",
-                reply_markup=inline_keyboard([[("Посмотреть статус", f"chl:status:{challenge.id}")]]),
+                reply_markup=inline_keyboard([[("🎯 Открыть челлендж", f"chl:status:{challenge.id}")]]),
             )
         except TelegramAPIError:
             failed = True
@@ -1672,11 +1760,12 @@ async def _record_challenge_status(
             }
         )
         await state.set_state(ChallengeEntryFSM.spent_amount)
-        quick = str(challenge.daily_amount or Decimal("0.00"))
+        quick_amount = _participant_daily_amount(challenge, user_id)
+        quick = str(quick_amount)
         await reply_callback(
             callback,
             "Сколько потратили?",
-            inline_keyboard([[(_money(challenge.daily_amount), f"chl:spend:{quick}")]]),
+            inline_keyboard([[(_money(quick_amount), f"chl:spend:{quick}")]]),
         )
         return
     try:

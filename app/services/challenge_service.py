@@ -42,6 +42,7 @@ class ChallengeService:
         start_date: date,
         end_date: date,
         daily_amount: Decimal | None = None,
+        participant_daily_amounts: dict[int, Decimal | str | int | None] | None = None,
         currency: str = RUB,
     ) -> Challenge:
         await self._member_repo.validate_membership(couple_id, created_by)
@@ -67,10 +68,18 @@ class ChallengeService:
             participant_ids = member_ids
 
         amount = None
+        participant_amounts: dict[int, Decimal] | None = None
         if challenge_type == "SAVINGS":
+            participant_amounts = {}
+            raw_amounts = participant_daily_amounts or {}
+            for participant_id in participant_ids:
+                participant_amount = self.normalize_money(raw_amounts.get(participant_id, daily_amount))
+                if participant_amount is None:
+                    raise ValidationError("Введите сумму на день для каждого участника.", field="daily_amount")
+                participant_amounts[participant_id] = participant_amount
             amount = self.normalize_money(daily_amount)
-            if amount is None:
-                raise ValidationError("Введите сумму на день.", field="daily_amount")
+            if amount is None and participant_amounts:
+                amount = sum(participant_amounts.values(), Decimal("0.00")) / Decimal(len(participant_amounts))
         elif daily_amount is not None:
             raise ValidationError("Сумма нужна только для челленджа с экономией.", field="daily_amount")
 
@@ -83,6 +92,7 @@ class ChallengeService:
             start_date=start_date,
             end_date=end_date,
             daily_amount=amount,
+            participant_daily_amounts=participant_amounts,
             currency=currency,
             participant_ids=participant_ids,
         )
@@ -148,8 +158,16 @@ class ChallengeService:
             for entry in challenge.entries
             if entry.user_id in participant_ids and entry.entry_date <= elapsed_until
         )
-        daily_amount = challenge.daily_amount or Decimal("0.00")
-        expected = daily_amount * Decimal(elapsed_days) * Decimal(len(participant_ids))
+        expected_per_day = sum(
+            (
+                participant.daily_amount
+                if participant.daily_amount is not None
+                else challenge.daily_amount or Decimal("0.00")
+            )
+            for participant in challenge.participants
+            if participant.user_id in participant_ids
+        )
+        expected = expected_per_day * Decimal(elapsed_days)
         return ChallengeStats(
             participant_count=len(participant_ids),
             elapsed_days=elapsed_days,

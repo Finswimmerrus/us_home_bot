@@ -4,6 +4,7 @@ from datetime import datetime
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.exceptions import Forbidden
 from app.models.couple import Couple
@@ -136,7 +137,11 @@ class CoupleMemberRepository:
         return [row[0] for row in result.all()]
 
     async def get_members(self, couple_id: int) -> list[CoupleMember]:
-        stmt = select(CoupleMember).where(CoupleMember.couple_id == couple_id)
+        stmt = (
+            select(CoupleMember)
+            .options(selectinload(CoupleMember.user))
+            .where(CoupleMember.couple_id == couple_id)
+        )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 

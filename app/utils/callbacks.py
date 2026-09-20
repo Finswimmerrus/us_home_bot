@@ -54,19 +54,19 @@ def optional_keyboard() -> ReplyKeyboardMarkup:
 
 
 def section_back_keyboard(callback_data: str = SECTION_BACK) -> InlineKeyboardMarkup:
-    return inline_keyboard([[("Назад", callback_data)]])
+    return inline_keyboard([[("↩️ Назад", callback_data)]])
 
 
 def back_to_menu_keyboard() -> InlineKeyboardMarkup:
-    return inline_keyboard([[("В главное меню", SECTION_BACK)]])
+    return inline_keyboard([[("↩️ Главное меню", SECTION_BACK)]])
 
 
 def couple_join_kb() -> InlineKeyboardMarkup:
     return inline_keyboard(
         [
-            [("Присоединиться по коду", "couple:join")],
-            [("Создать пару", "couple:create")],
-            [("Показать код приглашения", "couple:show_code")],
+            [("🔗 Присоединиться по коду", "couple:join")],
+            [("➕ Создать пару", "couple:create")],
+            [("👥 Показать код приглашения", "couple:show_code")],
         ]
     )
 

@@ -37,7 +37,7 @@ class Challenge(Base):
         ),
         CheckConstraint("end_date >= start_date", name="ck_challenge_period"),
         CheckConstraint(
-            "(challenge_type = 'SAVINGS' AND daily_amount IS NOT NULL AND daily_amount >= 0) "
+            "(challenge_type = 'SAVINGS' AND (daily_amount IS NULL OR daily_amount >= 0)) "
             "OR (challenge_type = 'SIMPLE' AND daily_amount IS NULL)",
             name="ck_challenge_daily_amount",
         ),
@@ -94,6 +94,7 @@ class ChallengeParticipant(Base):
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    daily_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
 
     challenge: Mapped[Challenge] = relationship(back_populates="participants", lazy="selectin")
     user: Mapped[User] = relationship(lazy="selectin")

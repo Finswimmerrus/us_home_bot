@@ -31,7 +31,10 @@ class ChallengeRepository:
         stmt = (
             select(Challenge)
             .join(ChallengeParticipant)
-            .options(selectinload(Challenge.participants))
+            .options(
+                selectinload(Challenge.participants).selectinload(ChallengeParticipant.user),
+                selectinload(Challenge.entries),
+            )
             .where(
                 Challenge.couple_id == couple_id,
                 ChallengeParticipant.user_id == user_id,
@@ -51,6 +54,7 @@ class ChallengeRepository:
         start_date: date,
         end_date: date,
         participant_ids: list[int],
+        participant_daily_amounts: dict[int, Decimal] | None = None,
         daily_amount: Decimal | None = None,
         currency: str = "RUB",
     ) -> Challenge:
@@ -67,11 +71,13 @@ class ChallengeRepository:
         )
         self._session.add(challenge)
         await self._session.flush()
+        amounts = participant_daily_amounts or {}
         for participant_id in participant_ids:
             self._session.add(
                 ChallengeParticipant(
                     challenge_id=challenge.id,
                     user_id=participant_id,
+                    daily_amount=amounts.get(participant_id),
                 )
             )
         await self._session.flush()

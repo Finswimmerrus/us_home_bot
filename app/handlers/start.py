@@ -33,11 +33,11 @@ router = Router()
 
 MAIN_MENU = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="Задачи"), KeyboardButton(text="Кино")],
-        [KeyboardButton(text="Списки"), KeyboardButton(text="Путешествия")],
-        [KeyboardButton(text="Вишлист"), KeyboardButton(text="Заметки")],
-        [KeyboardButton(text="Челленджи"), KeyboardButton(text="Настройки")],
-        [KeyboardButton(text="О паре")],
+        [KeyboardButton(text="✅ Задачи"), KeyboardButton(text="🎬 Кино")],
+        [KeyboardButton(text="🛒 Списки"), KeyboardButton(text="✈️ Путешествия")],
+        [KeyboardButton(text="🎁 Вишлист"), KeyboardButton(text="📝 Заметки")],
+        [KeyboardButton(text="🎯 Челленджи"), KeyboardButton(text="⚙️ Настройки")],
+        [KeyboardButton(text="👥 О паре")],
     ],
     resize_keyboard=True,
     one_time_keyboard=False,
@@ -315,7 +315,7 @@ async def cb_delete_couple(callback: CallbackQuery, context: Context, session: A
     await reply_callback(callback, "Пара удалена.", couple_join_kb())
 
 
-@router.message(lambda m: m.text == "О паре")
+@router.message(lambda m: m.text in {"О паре", "👥 О паре"})
 async def btn_couple_info(
     message: Message, context: Context, session: AsyncSession
 ) -> Message | None:
@@ -344,11 +344,11 @@ async def btn_couple_info(
 def _couple_menu_keyboard(invite_code: str | None) -> InlineKeyboardMarkup:
     rows = []
     if invite_code:
-        rows.append([("Показать код", "couple:show_code")])
-    rows.append([("Создать новый код", "couple:regenerate_code")])
+        rows.append([("🔗 Показать код", "couple:show_code")])
+    rows.append([("🔄 Новый код", "couple:regenerate_code")])
     rows.append([("Выйти из пары", "couple:leave_confirm")])
     rows.append([("Удалить пару", "couple:delete_confirm")])
-    rows.append([("Назад", SECTION_BACK)])
+    rows.append([("↩️ Главное меню", SECTION_BACK)])
     return inline_keyboard(rows)
 
 
