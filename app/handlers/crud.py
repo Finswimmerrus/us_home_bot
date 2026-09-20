@@ -1787,7 +1787,7 @@ async def cb_challenge_create_cancel(callback: CallbackQuery, context: Context, 
 async def cb_challenge_create_confirm(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
     data = await state.get_data()
     required = {"title", "scope", "challenge_type", "start_date", "end_date"}
-    if data.get("flow") != "challenge_create" or not required.issubset(data):
+    if not required.issubset(data):
         await state.clear()
         await alert_callback(callback, "Форма устарела. Создайте челлендж заново.")
         return
