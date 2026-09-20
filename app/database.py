@@ -3,7 +3,12 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 from sqlalchemy import event, text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.orm import DeclarativeBase
 
 from app.config import config
@@ -41,12 +46,28 @@ async def dispose_engine() -> None:
     await engine.dispose()
 
 
+async def ensure_runtime_schema(connection: AsyncConnection) -> None:
+    """Apply small idempotent SQLite upgrades before the bot starts."""
+    if connection.dialect.name != "sqlite":
+        return
+    result = await connection.execute(text("PRAGMA table_info(challenge_participants)"))
+    columns = {row[1] for row in result.fetchall()}
+    if columns and "daily_amount" not in columns:
+        await connection.execute(
+            text(
+                "ALTER TABLE challenge_participants "
+                "ADD COLUMN daily_amount NUMERIC(12, 2)"
+            )
+        )
+
+
 async def init_database() -> None:
     # Importing models registers every mapped table in Base.metadata.
     import app.models  # noqa: F401
 
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+        await ensure_runtime_schema(connection)
         await connection.execute(
             text(
                 "CREATE UNIQUE INDEX IF NOT EXISTS "
@@ -74,4 +95,12 @@ async def init_database() -> None:
             await connection.execute(text(statement))
 
 
-__all__ = ["Base", "engine", "SessionLocal", "get_session", "dispose_engine", "init_database"]
+__all__ = [
+    "Base",
+    "engine",
+    "SessionLocal",
+    "get_session",
+    "dispose_engine",
+    "ensure_runtime_schema",
+    "init_database",
+]

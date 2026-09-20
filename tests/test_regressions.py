@@ -10,8 +10,9 @@ from aiogram.enums import ChatType
 from aiogram.types import Chat, Message
 from aiogram.types import User as TelegramUser
 from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.database import SessionLocal
+from app.database import SessionLocal, ensure_runtime_schema
 from app.exceptions import CoupleFull
 from app.handlers import crud
 from app.handlers.sections import paginate, pagination_row
@@ -108,6 +109,41 @@ async def test_due_today_uses_full_sqlite_date() -> None:
 
         tasks = await TaskService(session).get_today_tasks(couple.id, user.id)
         assert [task.title for task in tasks] == ["Today"]
+
+
+async def test_runtime_schema_upgrades_existing_challenge_participants_table() -> None:
+    legacy_engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        async with legacy_engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "CREATE TABLE challenge_participants ("
+                    "id INTEGER PRIMARY KEY, challenge_id INTEGER NOT NULL, "
+                    "user_id INTEGER NOT NULL)"
+                )
+            )
+
+            await ensure_runtime_schema(connection)
+            await ensure_runtime_schema(connection)
+
+            result = await connection.execute(
+                text("PRAGMA table_info(challenge_participants)")
+            )
+            columns = {row[1] for row in result.fetchall()}
+            await connection.execute(
+                text(
+                    "INSERT INTO challenge_participants "
+                    "(challenge_id, user_id, daily_amount) VALUES (1, 2, 300)"
+                )
+            )
+            saved_amount = await connection.scalar(
+                text("SELECT daily_amount FROM challenge_participants")
+            )
+    finally:
+        await legacy_engine.dispose()
+
+    assert "daily_amount" in columns
+    assert saved_amount == 300
 
 
 async def test_stale_challenge_confirmation_is_handled(monkeypatch) -> None:
