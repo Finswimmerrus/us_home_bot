@@ -184,3 +184,34 @@ def test_challenge_text_and_actions_show_missing_savings_plan() -> None:
         for row in markup.inline_keyboard
         for button in row
     )
+
+
+def test_challenge_confirmation_uses_checkmark_button() -> None:
+    markup = crud._challenge_confirm_keyboard()
+
+    assert markup.inline_keyboard[0][0].text == "✅ Создать челлендж"
+    assert markup.inline_keyboard[0][0].callback_data == "chl:new:confirm"
+
+
+def test_challenge_calendar_hides_dates_before_minimum() -> None:
+    markup = crud._calendar_keyboard(
+        "end",
+        date(2026, 9, 1),
+        min_date=date(2026, 9, 20),
+    )
+
+    disabled_days = [
+        button.text
+        for row in markup.inline_keyboard
+        for button in row
+        if button.callback_data == "chl:new:cal:noop"
+    ]
+    selectable_days = {
+        button.text: button.callback_data
+        for row in markup.inline_keyboard
+        for button in row
+        if button.callback_data and button.callback_data.startswith("chl:new:date:end:")
+    }
+
+    assert "·" in disabled_days
+    assert selectable_days["20"] == "chl:new:date:end:2026-09-20"
