@@ -193,25 +193,55 @@ def test_challenge_confirmation_uses_checkmark_button() -> None:
     assert markup.inline_keyboard[0][0].callback_data == "chl:new:confirm"
 
 
-def test_challenge_calendar_hides_dates_before_minimum() -> None:
-    markup = crud._calendar_keyboard(
-        "end",
-        date(2026, 9, 1),
-        min_date=date(2026, 9, 20),
-    )
-
-    disabled_days = [
-        button.text
-        for row in markup.inline_keyboard
-        for button in row
-        if button.callback_data == "chl:new:cal:noop"
-    ]
-    selectable_days = {
+def test_challenge_date_keyboard_offers_shortcuts_and_manual_input() -> None:
+    markup = crud._challenge_date_keyboard("end", date(2026, 9, 20))
+    buttons = {
         button.text: button.callback_data
         for row in markup.inline_keyboard
         for button in row
-        if button.callback_data and button.callback_data.startswith("chl:new:date:end:")
     }
 
-    assert "·" in disabled_days
-    assert selectable_days["20"] == "chl:new:date:end:2026-09-20"
+    assert buttons["Сегодня"] == "chl:new:date:end:2026-09-20"
+    assert buttons["Завтра"] == "chl:new:date:end:2026-09-21"
+    assert buttons["⌨️ Ввести дату"] == "chl:new:date_input:end"
+
+    future_markup = crud._challenge_date_keyboard(
+        "end", date(2026, 9, 20), min_date=date(2026, 9, 22)
+    )
+    future_labels = {
+        button.text for row in future_markup.inline_keyboard for button in row
+    }
+    assert "Сегодня" not in future_labels
+    assert "Завтра" not in future_labels
+    assert "⌨️ Ввести дату" in future_labels
+
+
+async def test_savings_amount_moves_to_confirmation() -> None:
+    state = AsyncMock()
+    state.get_data.side_effect = [
+        {
+            "challenge_type": "SAVINGS",
+            "participant_plans": [{"user_id": 1, "name": "User"}],
+            "participant_amount_index": 0,
+            "participant_amounts": {},
+        },
+        {
+            "challenge_type": "SAVINGS",
+            "participant_plans": [{"user_id": 1, "name": "User"}],
+            "participant_amount_index": 1,
+            "participant_amounts": {1: "300.00"},
+            "title": "Savings",
+            "scope": "PERSONAL",
+            "start_date": "2026-09-20",
+            "end_date": "2026-09-21",
+        },
+    ]
+    message = SimpleNamespace(text="300", answer=AsyncMock())
+
+    await crud.msg_challenge_daily_amount(message, state)
+
+    state.set_state.assert_awaited_once_with(crud.ChallengeCreateFSM.confirm)
+    assert message.answer.await_count == 2
+    confirmation = message.answer.await_args_list[1]
+    assert confirmation.args[0].startswith("🎯 Новый челлендж")
+    assert confirmation.kwargs["reply_markup"].inline_keyboard[0][0].callback_data == "chl:new:confirm"

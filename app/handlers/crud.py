@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from calendar import monthrange
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -1307,69 +1306,32 @@ async def cb_note_delete(callback: CallbackQuery, context: Context, session: Any
 
 CHALLENGE_SCOPE_LABELS = {"PERSONAL": "Только я", "COUPLE": "Мы вместе"}
 CHALLENGE_TYPE_LABELS = {"SIMPLE": "Выполнение", "SAVINGS": "Экономия денег"}
-MONTH_NAMES = (
-    "",
-    "Январь",
-    "Февраль",
-    "Март",
-    "Апрель",
-    "Май",
-    "Июнь",
-    "Июль",
-    "Август",
-    "Сентябрь",
-    "Октябрь",
-    "Ноябрь",
-    "Декабрь",
-)
-
-
 def _money(value: Decimal | None) -> str:
     amount = (value or Decimal("0.00")).quantize(Decimal("0.01"))
     text = f"{amount:,.2f}".replace(",", " ").replace(".00", "")
     return f"{text} ₽"
 
 
-def _add_months(value: date, months: int) -> date:
-    month_index = value.month - 1 + months
-    year = value.year + month_index // 12
-    month = month_index % 12 + 1
-    day = min(value.day, monthrange(year, month)[1])
-    return date(year, month, day)
-
-
-def _calendar_keyboard(kind: str, month: date, min_date: date | None = None) -> Any:
-    first_day = date(month.year, month.month, 1)
-    previous_month = _add_months(first_day, -1)
-    next_month = _add_months(first_day, 1)
-    rows: list[list[tuple[str, str]]] = [
-        [
-            ("‹", f"chl:new:cal:{kind}:{previous_month.isoformat()}"),
-            (f"{MONTH_NAMES[first_day.month]} {first_day.year}", "chl:new:cal:noop"),
-            ("›", f"chl:new:cal:{kind}:{next_month.isoformat()}"),
-        ],
-        [("Пн", "chl:new:cal:noop"), ("Вт", "chl:new:cal:noop"), ("Ср", "chl:new:cal:noop"),
-         ("Чт", "chl:new:cal:noop"), ("Пт", "chl:new:cal:noop"), ("Сб", "chl:new:cal:noop"),
-         ("Вс", "chl:new:cal:noop")],
+def _challenge_date_keyboard(kind: str, today: date, min_date: date | None = None) -> Any:
+    tomorrow = today + timedelta(days=1)
+    shortcuts = [
+        ("Сегодня", today),
+        ("Завтра", tomorrow),
     ]
-    days_in_month = monthrange(first_day.year, first_day.month)[1]
-    row: list[tuple[str, str]] = []
-    for _ in range(first_day.weekday()):
-        row.append((" ", "chl:new:cal:noop"))
-    for day in range(1, days_in_month + 1):
-        current = date(first_day.year, first_day.month, day)
-        if min_date is not None and current < min_date:
-            row.append(("·", "chl:new:cal:noop"))
-        else:
-            row.append((str(day), f"chl:new:date:{kind}:{current.isoformat()}"))
-        if len(row) == 7:
-            rows.append(row)
-            row = []
-    if row:
-        while len(row) < 7:
-            row.append((" ", "chl:new:cal:noop"))
-        rows.append(row)
-    rows.append([("Отмена", "chl:new:cancel")])
+    shortcut_buttons = [
+        (label, f"chl:new:date:{kind}:{value.isoformat()}")
+        for label, value in shortcuts
+        if min_date is None or value >= min_date
+    ]
+    rows = []
+    if shortcut_buttons:
+        rows.append(shortcut_buttons)
+    rows.extend(
+        [
+            [("⌨️ Ввести дату", f"chl:new:date_input:{kind}")],
+            [("Отмена", "chl:new:cancel")],
+        ]
+    )
     return inline_keyboard(rows)
 
 
@@ -1635,7 +1597,7 @@ async def cb_challenge_type(callback: CallbackQuery, context: Context, state: FS
     await reply_callback(
         callback,
         "Дата начала:",
-        _calendar_keyboard("start", context.local_date()),
+        _challenge_date_keyboard("start", context.local_date()),
     )
 
 
@@ -1648,31 +1610,30 @@ async def cb_challenge_start_today(
     await reply_callback(
         callback,
         "Дата окончания:",
-        _calendar_keyboard("end", context.local_date(), context.local_date()),
+        _challenge_date_keyboard("end", context.local_date()),
     )
 
 
-@router.callback_query(lambda c: c.data and c.data.startswith("chl:new:cal:"))
-async def cb_challenge_calendar_nav(callback: CallbackQuery, state: FSMContext) -> None:
-    data = callback.data or ""
-    if data == "chl:new:cal:noop":
-        await alert_callback(callback, "Выберите дату.")
-        return
+@router.callback_query(lambda c: c.data and c.data.startswith("chl:new:date_input:"))
+async def cb_challenge_date_input(callback: CallbackQuery, state: FSMContext) -> None:
     state_data = await state.get_data()
     if state_data.get("flow") != "challenge_create":
         await alert_callback(callback, "Форма уже закрыта.")
         return
-    _, _, _, kind, month_raw = data.split(":", 4)
-    month = date.fromisoformat(month_raw)
-    min_date = None
-    if kind == "end" and state_data.get("start_date"):
-        min_date = date.fromisoformat(state_data["start_date"])
-    title = "Дата начала:" if kind == "start" else "Дата окончания:"
-    await reply_callback(callback, title, _calendar_keyboard(kind, month, min_date))
+    kind = (callback.data or "").rsplit(":", 1)[-1]
+    expected_state = ChallengeCreateFSM.start_date if kind == "start" else ChallengeCreateFSM.end_date
+    await state.set_state(expected_state)
+    await reply_callback(
+        callback,
+        "Введите дату в формате дд.мм.гггг:",
+        inline_keyboard([[("Отмена", "chl:new:cancel")]]),
+    )
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("chl:new:date:"))
-async def cb_challenge_date_select(callback: CallbackQuery, state: FSMContext) -> None:
+async def cb_challenge_date_select(
+    callback: CallbackQuery, context: Context, state: FSMContext
+) -> None:
     state_data = await state.get_data()
     if state_data.get("flow") != "challenge_create":
         await alert_callback(callback, "Форма уже закрыта.")
@@ -1685,7 +1646,7 @@ async def cb_challenge_date_select(callback: CallbackQuery, state: FSMContext) -
         await reply_callback(
             callback,
             "Дата окончания:",
-            _calendar_keyboard("end", selected, selected),
+            _challenge_date_keyboard("end", context.local_date(), min_date=selected),
         )
         return
     data = await state.get_data()
@@ -1697,7 +1658,9 @@ async def cb_challenge_date_select(callback: CallbackQuery, state: FSMContext) -
 
 
 @router.message(ChallengeCreateFSM.start_date)
-async def msg_challenge_start_date(message: Message, state: FSMContext) -> None:
+async def msg_challenge_start_date(
+    message: Message, context: Context, state: FSMContext
+) -> None:
     start = _parse_date(message.text)
     if start is None:
         await message.answer("Введите дату в формате дд.мм.гггг.")
@@ -1706,7 +1669,7 @@ async def msg_challenge_start_date(message: Message, state: FSMContext) -> None:
     await state.set_state(ChallengeCreateFSM.end_date)
     await message.answer(
         "Дата окончания:",
-        reply_markup=_calendar_keyboard("end", start, start),
+        reply_markup=_challenge_date_keyboard("end", context.local_date(), min_date=start),
     )
 
 
