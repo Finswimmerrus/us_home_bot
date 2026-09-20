@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -158,7 +158,7 @@ class TaskService:
 
     async def get_today_tasks(self, couple_id: int, user_id: int) -> list[Task]:
         await self._validate_access(couple_id, user_id)
-        return await self._task_repo.get_due_today(couple_id, datetime.utcnow())
+        return await self._task_repo.get_due_today(couple_id, datetime.now(UTC))
 
     async def get_upcoming_tasks(self, couple_id: int, user_id: int, limit: int = 5) -> list[Task]:
         await self._validate_access(couple_id, user_id)
@@ -166,12 +166,12 @@ class TaskService:
 
     async def get_overdue_tasks(self, couple_id: int, user_id: int) -> list[Task]:
         await self._validate_access(couple_id, user_id)
-        return await self._task_repo.get_overdue(couple_id, datetime.utcnow())
+        return await self._task_repo.get_overdue(couple_id, datetime.now(UTC))
 
     async def get_task_counts(self, couple_id: int, user_id: int) -> dict:
         await self._validate_access(couple_id, user_id)
         counts = await self._task_repo.count_by_status(couple_id)
-        today = datetime.utcnow().date()
+        today = datetime.now(UTC).date()
         active_tasks = await self._task_repo.get_by_status_for_couple(couple_id, "TODO")
         active_tasks += await self._task_repo.get_by_status_for_couple(couple_id, "IN_PROGRESS")
         due_today = [t for t in active_tasks if t.due_at and t.due_at.date() == today]

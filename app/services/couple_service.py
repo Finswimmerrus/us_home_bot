@@ -88,17 +88,16 @@ class CoupleService:
         if current_couple is not None and current_couple.id != couple.id:
             raise Conflict("Вы уже состоите в другой паре.")
 
-        member_count = await self._member_repo.count_members(couple.id)
-        if member_count >= 2:
-            raise CoupleFull(couple.id)
-
         if await self._member_repo.is_member(couple.id, user.id):
             return None
 
+        invite_code = couple.invite_code
+        if invite_code is None or not await self._couple_repo.claim_invitation(
+            couple.id, invite_code
+        ):
+            raise CoupleFull(couple.id)
+
         member = await self._member_repo.add(couple.id, user.id)
-        couple.invite_code = None
-        couple.invite_expires_at = None
-        await self._couple_repo.update(couple)
         logger.info(
             "User id=%s joined couple id=%s", user.id, couple.id
         )

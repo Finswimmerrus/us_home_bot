@@ -25,6 +25,7 @@ class List(Base):
     __table_args__ = (
         CheckConstraint("name <> ''", name="ck_list_name_nonempty"),
         UniqueConstraint("couple_id", "name", name="uq_list_couple_name"),
+        UniqueConstraint("id", "couple_id", name="uq_lists_id_couple_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)

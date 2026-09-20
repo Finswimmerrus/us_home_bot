@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -128,7 +128,7 @@ class ListItemRepository:
 
     async def complete(self, item: ListItem, completed_by: int) -> ListItem:
         item.completed_by = completed_by
-        item.completed_at = datetime.utcnow()
+        item.completed_at = datetime.now(UTC)
         self._session.add(item)
         await self._session.flush()
         await self._session.refresh(item)

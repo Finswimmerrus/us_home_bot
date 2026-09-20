@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -97,7 +97,7 @@ class MovieRepository:
             raise ValidationError(f"Invalid movie status: {new_status}", field="status")
         movie.status = new_status
         if new_status == "WATCHED" and not movie.watched_at:
-            movie.watched_at = datetime.utcnow()
+            movie.watched_at = datetime.now(UTC)
         elif new_status != "WATCHED":
             movie.watched_at = None
         return await self.update(movie)

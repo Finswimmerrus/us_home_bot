@@ -42,6 +42,8 @@ from app.handlers.sections import (
     _format_trips,
     _format_wishlist,
     _task_list_keyboard,
+    paginate,
+    pagination_row,
 )
 from app.handlers.start import MAIN_MENU
 from app.repositories.users import UserRepository
@@ -130,6 +132,14 @@ def _norm(text: str | None) -> str:
     return (text or "").strip()
 
 
+def _callback_page(callback: CallbackQuery, prefix: str) -> int:
+    data = callback.data or ""
+    marker = f"{prefix}:"
+    if not data.startswith(marker):
+        return 0
+    return max(callback_int(data.removeprefix(marker)), 0)
+
+
 def _is_skip(text: str | None) -> bool:
     return _norm(text).lower() in SKIP_VALUES
 
@@ -145,13 +155,16 @@ def _priority_keyboard(callback_prefix: str) -> Any:
 
 def _task_text(task: Any) -> str:
     assignee = f" (назначена: {task.assigned_to})" if task.assigned_to else ""
-    return (
+    text = (
         f"📌 {task.title}\n"
         f"Статус: {task.status}\n"
         f"Приоритет: {task.priority}{assignee}\n"
         f"Дедлайн: {_fmt_dt(task.due_at)}\n"
         f"ID: {task.id}"
     )
+    if task.description:
+        text += f"\n\n{task.description}"
+    return text
 
 
 def _task_detail_markup(task: Any) -> Any:
@@ -191,11 +204,18 @@ async def _task_by_callback(callback: CallbackQuery, context: Context, session: 
     return task, couple, user_id
 
 
-@router.callback_query(lambda c: c.data == "tasks:list")
+@router.callback_query(lambda c: c.data and c.data.startswith("tasks:list"))
 async def cb_tasks_list(callback: CallbackQuery, context: Context, session: Any) -> None:
     couple, user_id = await _uc(context, session)
-    items = await TaskService(session).get_all_tasks(couple.id, user_id, limit=20)
-    await reply_callback(callback, _format_tasks(items), _task_list_keyboard(items))
+    all_items = await TaskService(session).get_all_tasks(couple.id, user_id)
+    items, page, page_count = paginate(
+        all_items, _callback_page(callback, "tasks:list")
+    )
+    await reply_callback(
+        callback,
+        _format_tasks(items),
+        _task_list_keyboard(items, page, page_count),
+    )
 
 
 @router.callback_query(lambda c: c.data == "tasks:create")
@@ -506,10 +526,13 @@ async def _movie_by_callback(callback: CallbackQuery, context: Context, session:
 
 def _movie_text(movie: Any) -> str:
     watched = _fmt_dt(movie.watched_at) if getattr(movie, "watched_at", None) else "-"
-    return (
+    text = (
         f"🎬 {movie.title} [{movie.status}]\n"
         f"Жанр: {movie.type}\nПросмотр: {watched}\nID: {movie.id}"
     )
+    if movie.description:
+        text += f"\n\n{movie.description}"
+    return text
 
 
 def _movie_markup(movie: Any) -> Any:
@@ -525,16 +548,27 @@ def _movie_markup(movie: Any) -> Any:
     return inline_keyboard(rows)
 
 
-@router.callback_query(lambda c: c.data == "movies:list")
+@router.callback_query(lambda c: c.data and c.data.startswith("movies:list"))
 async def cb_movies_list(callback: CallbackQuery, context: Context, session: Any) -> None:
     couple, user_id = await _uc(context, session)
-    items = await MovieService(session).get_all_movies(couple.id, user_id, limit=20)
-    await reply_callback(callback, _format_movies(items), _movie_list_keyboard(items))
+    all_items = await MovieService(session).get_all_movies(couple.id, user_id)
+    items, page, page_count = paginate(
+        all_items, _callback_page(callback, "movies:list")
+    )
+    await reply_callback(
+        callback,
+        _format_movies(items),
+        _movie_list_keyboard(items, page, page_count),
+    )
 
 
-def _movie_list_keyboard(items: list[Any]) -> Any:
+def _movie_list_keyboard(
+    items: list[Any], page: int = 0, page_count: int = 1
+) -> Any:
     rows: list[list[tuple[str, str]]] = [[("Добавить", "movies:create")]]
     rows += [[(item.title, f"movie:{item.id}")] for item in items]
+    if nav := pagination_row("movies:list", page, page_count):
+        rows.append(nav)
     return inline_keyboard(rows)
 
 
@@ -705,16 +739,27 @@ async def _list_by_callback(callback: CallbackQuery, context: Context, session: 
     return lst, couple, user_id
 
 
-@router.callback_query(lambda c: c.data == "lists:list")
+@router.callback_query(lambda c: c.data and c.data.startswith("lists:list"))
 async def cb_lists_list(callback: CallbackQuery, context: Context, session: Any) -> None:
     couple, user_id = await _uc(context, session)
-    items = await ListService(session).get_all_lists(couple.id, user_id, limit=20)
-    await reply_callback(callback, _format_lists(items), _list_list_keyboard(items))
+    all_items = await ListService(session).get_all_lists(couple.id, user_id)
+    items, page, page_count = paginate(
+        all_items, _callback_page(callback, "lists:list")
+    )
+    await reply_callback(
+        callback,
+        _format_lists(items),
+        _list_list_keyboard(items, page, page_count),
+    )
 
 
-def _list_list_keyboard(items: list[Any]) -> Any:
+def _list_list_keyboard(
+    items: list[Any], page: int = 0, page_count: int = 1
+) -> Any:
     rows: list[list[tuple[str, str]]] = [[("Добавить список", "lists:create")]]
     rows += [[(item.name, f"list:{item.id}")] for item in items]
+    if nav := pagination_row("lists:list", page, page_count):
+        rows.append(nav)
     return inline_keyboard(rows)
 
 
@@ -913,12 +958,17 @@ def _place_detail_markup(place: Any) -> Any:
     )
 
 
-@router.callback_query(lambda c: c.data == "trips:list")
+@router.callback_query(lambda c: c.data and c.data.startswith("trips:list"))
 async def cb_trips_list(callback: CallbackQuery, context: Context, session: Any) -> None:
     couple, user_id = await _uc(context, session)
-    items = await TripService(session).get_all_trips(couple.id, user_id, limit=20)
+    all_items = await TripService(session).get_all_trips(couple.id, user_id)
+    items, page, page_count = paginate(
+        all_items, _callback_page(callback, "trips:list")
+    )
     rows = [[("Добавить путешествие", "trips:create")]]
     rows += [[(i.name, f"trip:{i.id}")] for i in items]
+    if nav := pagination_row("trips:list", page, page_count):
+        rows.append(nav)
     await reply_callback(callback, _format_trips(items), inline_keyboard(rows))
 
 
@@ -1035,7 +1085,13 @@ async def _wish_by_callback(callback, context, session):
 
 def _wish_text(item: Any) -> str:
     price = f" {item.price}₽" if getattr(item, "price", None) else ""
-    return f"🎁 {item.title} [{item.status}]{price}\nID: {item.id}"
+    lines = [f"🎁 {item.title} [{item.status}]{price}"]
+    if item.description:
+        lines.append(item.description)
+    if item.url:
+        lines.append(f"Ссылка: {item.url}")
+    lines.append(f"ID: {item.id}")
+    return "\n".join(lines)
 
 
 def _wish_markup(item: Any) -> Any:
@@ -1047,12 +1103,17 @@ def _wish_markup(item: Any) -> Any:
     return inline_keyboard(rows)
 
 
-@router.callback_query(lambda c: c.data == "wishlist:list")
+@router.callback_query(lambda c: c.data and c.data.startswith("wishlist:list"))
 async def cb_wishlist_list(callback: CallbackQuery, context: Context, session: Any) -> None:
     couple, user_id = await _uc(context, session)
-    items = await WishlistService(session).get_all_items(couple.id, user_id, limit=20)
+    all_items = await WishlistService(session).get_all_items(couple.id, user_id)
+    items, page, page_count = paginate(
+        all_items, _callback_page(callback, "wishlist:list")
+    )
     rows: list[list[tuple[str, str]]] = [[("Добавить", "wishlist:create")]]
     rows += [[(item.title, f"wish:{item.id}")] for item in items]
+    if nav := pagination_row("wishlist:list", page, page_count):
+        rows.append(nav)
     await reply_callback(callback, _format_wishlist(items), inline_keyboard(rows))
 
 
@@ -1131,12 +1192,17 @@ def _note_markup(note: Any) -> Any:
     )
 
 
-@router.callback_query(lambda c: c.data == "notes:list")
+@router.callback_query(lambda c: c.data and c.data.startswith("notes:list"))
 async def cb_notes_list(callback: CallbackQuery, context: Context, session: Any) -> None:
     couple, user_id = await _uc(context, session)
-    items = await NoteService(session).get_all_notes(couple.id, user_id, limit=20)
+    all_items = await NoteService(session).get_all_notes(couple.id, user_id)
+    items, page, page_count = paginate(
+        all_items, _callback_page(callback, "notes:list")
+    )
     rows: list[list[tuple[str, str]]] = [[("Добавить заметку", "notes:create")]]
     rows += [[(item.title, f"note:{item.id}")] for item in items]
+    if nav := pagination_row("notes:list", page, page_count):
+        rows.append(nav)
     await reply_callback(callback, _format_notes(items), inline_keyboard(rows))
 
 
@@ -1291,8 +1357,7 @@ def _challenge_status_label(entry: Any | None) -> str:
     return "не получилось"
 
 
-def _challenge_text(challenge: Any, viewer_id: int) -> str:
-    today = date.today()
+def _challenge_text(challenge: Any, viewer_id: int, today: date) -> str:
     participant_by_id = {participant.user_id: participant for participant in challenge.participants}
     today_entry = _challenge_entry(challenge, viewer_id, today)
     lines = [
@@ -1319,10 +1384,14 @@ def _challenge_text(challenge: Any, viewer_id: int) -> str:
     return "\n".join(lines).strip()
 
 
-def _challenge_detail_markup(challenge: Any, user_id: int, show_today_prompt: bool = True) -> Any:
+def _challenge_detail_markup(
+    challenge: Any,
+    user_id: int,
+    today: date,
+    show_today_prompt: bool = True,
+) -> Any:
     rows: list[list[tuple[str, str]]] = []
     rows.append([("Статус", f"chl:status:{challenge.id}")])
-    today = date.today()
     if (
         show_today_prompt
         and challenge.start_date <= today <= challenge.end_date
@@ -1334,7 +1403,7 @@ def _challenge_detail_markup(challenge: Any, user_id: int, show_today_prompt: bo
                 [("Сегодня не получилось", f"chl:miss:{challenge.id}")],
             ]
         )
-    yesterday = date.today() - timedelta(days=1)
+    yesterday = today - timedelta(days=1)
     if (
         challenge.start_date <= yesterday <= challenge.end_date
         and _challenge_entry(challenge, user_id, yesterday) is None
@@ -1363,11 +1432,18 @@ def _challenge_summary(data: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-@router.callback_query(lambda c: c.data == "challenges:list")
+@router.callback_query(lambda c: c.data and c.data.startswith("challenges:list"))
 async def cb_challenges_list(callback: CallbackQuery, context: Context, session: Any) -> None:
     couple, user_id = await _uc(context, session)
-    items = await ChallengeService(session).list_challenges(couple.id, user_id)
-    await reply_callback(callback, _format_challenges(items), _challenge_list_keyboard(items))
+    all_items = await ChallengeService(session).list_challenges(couple.id, user_id)
+    items, page, page_count = paginate(
+        all_items, _callback_page(callback, "challenges:list")
+    )
+    await reply_callback(
+        callback,
+        _format_challenges(items),
+        _challenge_list_keyboard(items, page, page_count),
+    )
 
 
 @router.callback_query(lambda c: c.data == "challenges:create")
@@ -1421,8 +1497,10 @@ async def cb_challenge_type(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 @router.callback_query(lambda c: c.data == "chl:new:start:today")
-async def cb_challenge_start_today(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(start_date=date.today().isoformat())
+async def cb_challenge_start_today(
+    callback: CallbackQuery, context: Context, state: FSMContext
+) -> None:
+    await state.update_data(start_date=context.local_date().isoformat())
     await state.set_state(ChallengeCreateFSM.end_date)
     await reply_callback(callback, "Дата окончания (дд.мм.гггг):", cancel_keyboard())
 
@@ -1490,6 +1568,11 @@ async def cb_challenge_create_cancel(callback: CallbackQuery, state: FSMContext)
 @router.callback_query(lambda c: c.data == "chl:new:confirm")
 async def cb_challenge_create_confirm(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
     data = await state.get_data()
+    required = {"title", "scope", "challenge_type", "start_date", "end_date"}
+    if not required.issubset(data):
+        await state.clear()
+        await alert_callback(callback, "Форма устарела. Создайте челлендж заново.")
+        return
     couple, user_id = await _uc(context, session)
     try:
         challenge = await ChallengeService(session).create_challenge(
@@ -1508,13 +1591,14 @@ async def cb_challenge_create_confirm(callback: CallbackQuery, context: Context,
     await state.clear()
     challenge = await ChallengeService(session).get_challenge(couple.id, user_id, challenge.id)
     notification_failed = await _notify_challenge_partners(callback, challenge, user_id)
-    text = f"Челлендж создан.\n\n{_challenge_text(challenge, user_id)}"
+    today = context.local_date()
+    text = f"Челлендж создан.\n\n{_challenge_text(challenge, user_id, today)}"
     if notification_failed:
         text += "\n\nНе удалось отправить уведомление партнёру."
     await reply_callback(
         callback,
         text,
-        _challenge_detail_markup(challenge, user_id, show_today_prompt=False),
+        _challenge_detail_markup(challenge, user_id, today, show_today_prompt=False),
     )
 
 
@@ -1546,7 +1630,12 @@ async def cb_challenge_detail(callback: CallbackQuery, context: Context, session
     challenge_id = callback_int(callback.data.split(":")[1])
     couple, user_id = await _uc(context, session)
     challenge = await ChallengeService(session).get_challenge(couple.id, user_id, challenge_id)
-    await reply_callback(callback, _challenge_text(challenge, user_id), _challenge_detail_markup(challenge, user_id))
+    today = context.local_date()
+    await reply_callback(
+        callback,
+        _challenge_text(challenge, user_id, today),
+        _challenge_detail_markup(challenge, user_id, today),
+    )
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("chl:status:"))
@@ -1554,7 +1643,12 @@ async def cb_challenge_status(callback: CallbackQuery, context: Context, session
     challenge_id = callback_int(callback.data.split(":")[2])
     couple, user_id = await _uc(context, session)
     challenge = await ChallengeService(session).get_challenge(couple.id, user_id, challenge_id)
-    await reply_callback(callback, _challenge_text(challenge, user_id), _challenge_detail_markup(challenge, user_id))
+    today = context.local_date()
+    await reply_callback(
+        callback,
+        _challenge_text(challenge, user_id, today),
+        _challenge_detail_markup(challenge, user_id, today),
+    )
 
 
 async def _record_challenge_status(
@@ -1586,32 +1680,62 @@ async def _record_challenge_status(
         )
         return
     try:
-        await service.record_entry(couple.id, user_id, challenge.id, entry_date, status)
+        await service.record_entry(
+            couple.id,
+            user_id,
+            challenge.id,
+            entry_date,
+            status,
+            today=context.local_date(),
+        )
     except ValidationError as exc:
         await alert_callback(callback, exc.message)
         return
     challenge = await service.get_challenge(couple.id, user_id, challenge.id)
-    await reply_callback(callback, _challenge_text(challenge, user_id), _challenge_detail_markup(challenge, user_id))
+    today = context.local_date()
+    await reply_callback(
+        callback,
+        _challenge_text(challenge, user_id, today),
+        _challenge_detail_markup(challenge, user_id, today),
+    )
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("chl:ok:"))
 async def cb_challenge_success(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
-    await _record_challenge_status(callback, context, session, state, "SUCCESS", date.today())
+    await _record_challenge_status(
+        callback, context, session, state, "SUCCESS", context.local_date()
+    )
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("chl:miss:"))
 async def cb_challenge_missed(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
-    await _record_challenge_status(callback, context, session, state, "MISSED", date.today())
+    await _record_challenge_status(
+        callback, context, session, state, "MISSED", context.local_date()
+    )
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("chl:yok:"))
 async def cb_challenge_yesterday_success(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
-    await _record_challenge_status(callback, context, session, state, "SUCCESS", date.today() - timedelta(days=1))
+    await _record_challenge_status(
+        callback,
+        context,
+        session,
+        state,
+        "SUCCESS",
+        context.local_date() - timedelta(days=1),
+    )
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("chl:ymiss:"))
 async def cb_challenge_yesterday_missed(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
-    await _record_challenge_status(callback, context, session, state, "MISSED", date.today() - timedelta(days=1))
+    await _record_challenge_status(
+        callback,
+        context,
+        session,
+        state,
+        "MISSED",
+        context.local_date() - timedelta(days=1),
+    )
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("chl:spend:"))
@@ -1627,13 +1751,28 @@ async def msg_challenge_spend(message: Message, context: Context, session: Any, 
 
 async def _save_challenge_spend(event: CallbackQuery | Message, context: Context, session: Any, state: FSMContext, amount_text: str | None) -> None:
     data = await state.get_data()
+    if not {"challenge_id", "entry_date"}.issubset(data):
+        await state.clear()
+        if isinstance(event, CallbackQuery):
+            await alert_callback(event, "Форма устарела. Откройте челлендж заново.")
+        else:
+            await event.answer("Форма устарела. Откройте челлендж заново.")
+        return
     challenge_id = callback_int(data.get("challenge_id"))
     entry_date = date.fromisoformat(data["entry_date"])
     couple, user_id = await _uc(context, session)
     service = ChallengeService(session)
     try:
         amount = ChallengeService.normalize_money(amount_text)
-        await service.record_entry(couple.id, user_id, challenge_id, entry_date, "MISSED", amount)
+        await service.record_entry(
+            couple.id,
+            user_id,
+            challenge_id,
+            entry_date,
+            "MISSED",
+            amount,
+            today=context.local_date(),
+        )
     except ValidationError as exc:
         if isinstance(event, CallbackQuery):
             await alert_callback(event, exc.message)
@@ -1643,9 +1782,18 @@ async def _save_challenge_spend(event: CallbackQuery | Message, context: Context
     await state.clear()
     challenge = await service.get_challenge(couple.id, user_id, challenge_id)
     if isinstance(event, CallbackQuery):
-        await reply_callback(event, _challenge_text(challenge, user_id), _challenge_detail_markup(challenge, user_id))
+        today = context.local_date()
+        await reply_callback(
+            event,
+            _challenge_text(challenge, user_id, today),
+            _challenge_detail_markup(challenge, user_id, today),
+        )
     else:
-        await event.answer(_challenge_text(challenge, user_id), reply_markup=_challenge_detail_markup(challenge, user_id))
+        today = context.local_date()
+        await event.answer(
+            _challenge_text(challenge, user_id, today),
+            reply_markup=_challenge_detail_markup(challenge, user_id, today),
+        )
 
 
 @router.callback_query(lambda c: c.data == "settings:display")

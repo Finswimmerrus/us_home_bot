@@ -11,7 +11,12 @@ from app.handlers.crud import router as crud_router
 from app.handlers.fsm import storage
 from app.handlers.sections import router as sections_router
 from app.handlers.start import router as start_router
-from app.middleware import ContextMiddleware, SessionMiddleware, register_error_handler
+from app.middleware import (
+    ContextMiddleware,
+    PrivateChatMiddleware,
+    SessionMiddleware,
+    register_error_handler,
+)
 from app.utils import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -24,6 +29,8 @@ async def run() -> None:
 
     bot = Bot(token=settings.BOT_TOKEN.get_secret_value())
     dispatcher = Dispatcher(storage=storage)
+    dispatcher.message.outer_middleware(PrivateChatMiddleware())
+    dispatcher.callback_query.outer_middleware(PrivateChatMiddleware())
     dispatcher.message.middleware(SessionMiddleware())
     dispatcher.callback_query.middleware(SessionMiddleware())
     dispatcher.message.middleware(ContextMiddleware())

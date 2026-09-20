@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
-from sqlalchemy import Date, cast, func, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.exceptions import (
@@ -121,7 +121,7 @@ class TaskRepository:
             raise InvalidStatusTransition(task.status, new_status, allowed)
         task.status = new_status
         if new_status == "DONE" and not task.completed_at:
-            task.completed_at = datetime.utcnow()
+            task.completed_at = datetime.now(UTC)
             task.completed_by = user_id
         elif new_status != "DONE":
             task.completed_at = None
@@ -138,7 +138,7 @@ class TaskRepository:
         stmt = select(Task).where(
             Task.couple_id == couple_id,
             Task.status != "DONE",
-            cast(Task.due_at, Date) == cast(today, Date),
+            func.date(Task.due_at) == today.date().isoformat(),
         )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())

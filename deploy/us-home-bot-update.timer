@@ -1,0 +1,12 @@
+[Unit]
+Description=Check GitHub for US Home Bot updates
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+RandomizedDelaySec=10s
+Persistent=true
+Unit=us-home-bot-update.service
+
+[Install]
+WantedBy=timers.target

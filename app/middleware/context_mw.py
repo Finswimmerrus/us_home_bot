@@ -24,15 +24,18 @@ class ContextMiddleware(BaseMiddleware):
     ) -> object:
         telegram_user: TelegramUser | None = getattr(event, "from_user", None)
         user_id = None
+        timezone = "UTC"
         if telegram_user is not None:
             user = await CoupleService(data["session"]).get_or_create_user(
                 telegram_user.id, telegram_user.username, telegram_user.first_name
             )
             user_id = user.id
+            timezone = user.timezone
 
         context = build_context(
             user_id=user_id,
             telegram_user=telegram_user,
+            timezone=timezone,
         )
         data["context"] = context
         data["user_id"] = user_id

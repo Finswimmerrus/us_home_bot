@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.exceptions import Forbidden
@@ -87,6 +87,15 @@ class CoupleRepository:
         await self._session.flush()
         await self._session.refresh(couple)
         return couple
+
+    async def claim_invitation(self, couple_id: int, invite_code: str) -> bool:
+        stmt = (
+            update(Couple)
+            .where(Couple.id == couple_id, Couple.invite_code == invite_code)
+            .values(invite_code=None, invite_expires_at=None)
+        )
+        result = await self._session.execute(stmt)
+        return result.rowcount == 1
 
     async def delete(self, couple: Couple) -> None:
         await self._session.delete(couple)

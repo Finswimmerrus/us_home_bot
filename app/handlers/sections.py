@@ -23,6 +23,7 @@ from app.utils.context import Context
 
 router = Router()
 logger = logging.getLogger(__name__)
+PAGE_SIZE = 10
 
 SECTION_LABELS = {
     "Задачи",
@@ -96,45 +97,89 @@ def _format_challenges(items: list[Any]) -> str:
     )
 
 
-def _task_list_keyboard(items: list[Any]) -> Any:
+def paginate(items: list[Any], page: int) -> tuple[list[Any], int, int]:
+    page_count = max(1, (len(items) + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = min(max(page, 0), page_count - 1)
+    start = page * PAGE_SIZE
+    return items[start : start + PAGE_SIZE], page, page_count
+
+
+def pagination_row(prefix: str, page: int, page_count: int) -> list[tuple[str, str]]:
+    row: list[tuple[str, str]] = []
+    if page > 0:
+        row.append(("Назад", f"{prefix}:{page - 1}"))
+    if page + 1 < page_count:
+        row.append(("Далее", f"{prefix}:{page + 1}"))
+    return row
+
+
+def _task_list_keyboard(
+    items: list[Any], page: int = 0, page_count: int = 1
+) -> Any:
     rows: list[list[tuple[str, str]]] = [[("Добавить задачу", "tasks:create")]]
     rows += [[(item.title, f"task:{item.id}")] for item in items]
+    if nav := pagination_row("tasks:list", page, page_count):
+        rows.append(nav)
     return inline_keyboard(rows)
 
 
-def _movie_list_keyboard(items: list[Any]) -> Any:
+def _movie_list_keyboard(
+    items: list[Any], page: int = 0, page_count: int = 1
+) -> Any:
     rows: list[list[tuple[str, str]]] = [[("Добавить", "movies:create")]]
     rows += [[(item.title, f"movie:{item.id}")] for item in items]
+    if nav := pagination_row("movies:list", page, page_count):
+        rows.append(nav)
     return inline_keyboard(rows)
 
 
-def _list_list_keyboard(items: list[Any]) -> Any:
+def _list_list_keyboard(
+    items: list[Any], page: int = 0, page_count: int = 1
+) -> Any:
     rows: list[list[tuple[str, str]]] = [[("Добавить список", "lists:create")]]
     rows += [[(item.name, f"list:{item.id}")] for item in items]
+    if nav := pagination_row("lists:list", page, page_count):
+        rows.append(nav)
     return inline_keyboard(rows)
 
 
-def _trip_list_keyboard(items: list[Any]) -> Any:
+def _trip_list_keyboard(
+    items: list[Any], page: int = 0, page_count: int = 1
+) -> Any:
     rows: list[list[tuple[str, str]]] = [[("Добавить путешествие", "trips:create")]]
     rows += [[(item.name, f"trip:{item.id}")] for item in items]
+    if nav := pagination_row("trips:list", page, page_count):
+        rows.append(nav)
     return inline_keyboard(rows)
 
 
-def _wishlist_list_keyboard(items: list[Any]) -> Any:
+def _wishlist_list_keyboard(
+    items: list[Any], page: int = 0, page_count: int = 1
+) -> Any:
     rows: list[list[tuple[str, str]]] = [[("Добавить", "wishlist:create")]]
     rows += [[(item.title, f"wish:{item.id}")] for item in items]
+    if nav := pagination_row("wishlist:list", page, page_count):
+        rows.append(nav)
     return inline_keyboard(rows)
 
 
-def _note_list_keyboard(items: list[Any]) -> Any:
+def _note_list_keyboard(
+    items: list[Any], page: int = 0, page_count: int = 1
+) -> Any:
     rows: list[list[tuple[str, str]]] = [[("Добавить заметку", "notes:create")]]
     rows += [[(item.title, f"note:{item.id}")] for item in items]
+    if nav := pagination_row("notes:list", page, page_count):
+        rows.append(nav)
     return inline_keyboard(rows)
 
 
-def _challenge_list_keyboard(items: list[Any]) -> Any:
+def _challenge_list_keyboard(
+    items: list[Any], page: int = 0, page_count: int = 1
+) -> Any:
     rows: list[list[tuple[str, str]]] = [[("Создать челлендж", "challenges:create")]]
     rows += [[(item.title[:40], f"chl:{item.id}")] for item in items]
+    if nav := pagination_row("challenges:list", page, page_count):
+        rows.append(nav)
     return inline_keyboard(rows)
 
 
@@ -151,26 +196,54 @@ async def show_section(message: Message, context: Context, session: AsyncSession
 
     section = message.text
     if section == "Задачи":
-        items = await TaskService(session).get_all_tasks(couple.id, user_id, limit=20)
-        await message.answer(_format_tasks(items), reply_markup=_task_list_keyboard(items))
+        all_items = await TaskService(session).get_all_tasks(couple.id, user_id)
+        items, page, page_count = paginate(all_items, 0)
+        await message.answer(
+            _format_tasks(items),
+            reply_markup=_task_list_keyboard(items, page, page_count),
+        )
     elif section == "Кино":
-        items = await MovieService(session).get_all_movies(couple.id, user_id, limit=20)
-        await message.answer(_format_movies(items), reply_markup=_movie_list_keyboard(items))
+        all_items = await MovieService(session).get_all_movies(couple.id, user_id)
+        items, page, page_count = paginate(all_items, 0)
+        await message.answer(
+            _format_movies(items),
+            reply_markup=_movie_list_keyboard(items, page, page_count),
+        )
     elif section == "Списки":
-        items = await ListService(session).get_all_lists(couple.id, user_id, limit=20)
-        await message.answer(_format_lists(items), reply_markup=_list_list_keyboard(items))
+        all_items = await ListService(session).get_all_lists(couple.id, user_id)
+        items, page, page_count = paginate(all_items, 0)
+        await message.answer(
+            _format_lists(items),
+            reply_markup=_list_list_keyboard(items, page, page_count),
+        )
     elif section == "Путешествия":
-        items = await TripService(session).get_all_trips(couple.id, user_id, limit=20)
-        await message.answer(_format_trips(items), reply_markup=_trip_list_keyboard(items))
+        all_items = await TripService(session).get_all_trips(couple.id, user_id)
+        items, page, page_count = paginate(all_items, 0)
+        await message.answer(
+            _format_trips(items),
+            reply_markup=_trip_list_keyboard(items, page, page_count),
+        )
     elif section == "Вишлист":
-        items = await WishlistService(session).get_all_items(couple.id, user_id, limit=20)
-        await message.answer(_format_wishlist(items), reply_markup=_wishlist_list_keyboard(items))
+        all_items = await WishlistService(session).get_all_items(couple.id, user_id)
+        items, page, page_count = paginate(all_items, 0)
+        await message.answer(
+            _format_wishlist(items),
+            reply_markup=_wishlist_list_keyboard(items, page, page_count),
+        )
     elif section == "Заметки":
-        items = await NoteService(session).get_all_notes(couple.id, user_id, limit=20)
-        await message.answer(_format_notes(items), reply_markup=_note_list_keyboard(items))
+        all_items = await NoteService(session).get_all_notes(couple.id, user_id)
+        items, page, page_count = paginate(all_items, 0)
+        await message.answer(
+            _format_notes(items),
+            reply_markup=_note_list_keyboard(items, page, page_count),
+        )
     elif section == "Челленджи":
-        items = await ChallengeService(session).list_challenges(couple.id, user_id)
-        await message.answer(_format_challenges(items), reply_markup=_challenge_list_keyboard(items))
+        all_items = await ChallengeService(session).list_challenges(couple.id, user_id)
+        items, page, page_count = paginate(all_items, 0)
+        await message.answer(
+            _format_challenges(items),
+            reply_markup=_challenge_list_keyboard(items, page, page_count),
+        )
     else:
         user_settings = await SettingsService(session).get_user_settings(user_id)
         couple_settings = await SettingsService(session).get_couple_settings(couple.id, user_id)

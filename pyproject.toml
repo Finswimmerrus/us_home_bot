@@ -10,9 +10,7 @@ requires-python = ">=3.12"
 dependencies = [
     "aiogram==3.7.0",
     "SQLAlchemy[asyncio]==2.0.36",
-    "asyncpg==0.29.0",
     "aiosqlite==0.20.0",
-    "Alembic==1.13.1",
     "pydantic-settings==2.7.1",
     "python-dotenv==1.0.1",
     "tzdata>=2025.1",
@@ -51,10 +49,6 @@ ignore = [
 [tool.ruff.lint.isort]
 known-first-party = ["app"]
 
-[tool.ruff.lint.per-file-ignores]
-"migrations/versions/*.py" = ["E402", "SIM101"]
-"migrations/env.py" = ["E402", "F401"]
-
 [tool.mypy]
 python_version = "3.12"
 warn_return_any = true
@@ -62,14 +56,6 @@ warn_unused_configs = true
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
 check_untyped_defs = true
-
-[[tool.mypy.overrides]]
-module = "alembic.*"
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = "asyncpg.*"
-ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
