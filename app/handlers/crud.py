@@ -1236,12 +1236,29 @@ def _user_name(user: Any | None, fallback: str) -> str:
     return user.display_name or user.first_name or user.username or fallback
 
 
+def _challenge_entry(challenge: Any, user_id: int, entry_date: date) -> Any | None:
+    for entry in challenge.entries:
+        if entry.user_id == user_id and entry.entry_date == entry_date:
+            return entry
+    return None
+
+
+def _challenge_status_label(entry: Any | None) -> str:
+    if entry is None:
+        return "нет отметки"
+    if entry.status == "SUCCESS":
+        return "получилось"
+    return "не получилось"
+
+
 def _challenge_text(challenge: Any, viewer_id: int) -> str:
     today = date.today()
     participant_by_id = {participant.user_id: participant for participant in challenge.participants}
+    today_entry = _challenge_entry(challenge, viewer_id, today)
     lines = [
         challenge.title,
         f"{challenge.start_date.strftime('%d.%m')}–{challenge.end_date.strftime('%d.%m')}",
+        f"Сегодня: {_challenge_status_label(today_entry)}",
         "",
     ]
     visible_participants = challenge.participants
@@ -1262,13 +1279,25 @@ def _challenge_text(challenge: Any, viewer_id: int) -> str:
     return "\n".join(lines).strip()
 
 
-def _challenge_detail_markup(challenge: Any) -> Any:
-    rows = [
-        [("Сегодня получилось", f"chl:ok:{challenge.id}")],
-        [("Сегодня не получилось", f"chl:miss:{challenge.id}")],
-    ]
+def _challenge_detail_markup(challenge: Any, user_id: int, show_today_prompt: bool = True) -> Any:
+    rows: list[list[tuple[str, str]]] = []
+    today = date.today()
+    if (
+        show_today_prompt
+        and challenge.start_date <= today <= challenge.end_date
+        and _challenge_entry(challenge, user_id, today) is None
+    ):
+        rows.extend(
+            [
+                [("Сегодня получилось", f"chl:ok:{challenge.id}")],
+                [("Сегодня не получилось", f"chl:miss:{challenge.id}")],
+            ]
+        )
     yesterday = date.today() - timedelta(days=1)
-    if challenge.start_date <= yesterday <= challenge.end_date:
+    if (
+        challenge.start_date <= yesterday <= challenge.end_date
+        and _challenge_entry(challenge, user_id, yesterday) is None
+    ):
         rows.append(
             [
                 ("Вчера получилось", f"chl:yok:{challenge.id}"),
@@ -1436,7 +1465,12 @@ async def cb_challenge_create_confirm(callback: CallbackQuery, context: Context,
         await alert_callback(callback, exc.message)
         return
     await state.clear()
-    await reply_callback(callback, f"Челлендж «{challenge.title}» создан.", _challenge_detail_markup(challenge))
+    challenge = await ChallengeService(session).get_challenge(couple.id, user_id, challenge.id)
+    await reply_callback(
+        callback,
+        f"Челлендж создан.\n\n{_challenge_text(challenge, user_id)}",
+        _challenge_detail_markup(challenge, user_id, show_today_prompt=False),
+    )
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("chl:") and c.data.split(":")[1].isdigit())
@@ -1444,7 +1478,7 @@ async def cb_challenge_detail(callback: CallbackQuery, context: Context, session
     challenge_id = callback_int(callback.data.split(":")[1])
     couple, user_id = await _uc(context, session)
     challenge = await ChallengeService(session).get_challenge(couple.id, user_id, challenge_id)
-    await reply_callback(callback, _challenge_text(challenge, user_id), _challenge_detail_markup(challenge))
+    await reply_callback(callback, _challenge_text(challenge, user_id), _challenge_detail_markup(challenge, user_id))
 
 
 async def _record_challenge_status(
@@ -1481,7 +1515,7 @@ async def _record_challenge_status(
         await alert_callback(callback, exc.message)
         return
     challenge = await service.get_challenge(couple.id, user_id, challenge.id)
-    await reply_callback(callback, "Отметка сохранена.", _challenge_detail_markup(challenge))
+    await reply_callback(callback, _challenge_text(challenge, user_id), _challenge_detail_markup(challenge, user_id))
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("chl:ok:"))
@@ -1532,11 +1566,10 @@ async def _save_challenge_spend(event: CallbackQuery | Message, context: Context
         return
     await state.clear()
     challenge = await service.get_challenge(couple.id, user_id, challenge_id)
-    text = "Отметка сохранена."
     if isinstance(event, CallbackQuery):
-        await reply_callback(event, text, _challenge_detail_markup(challenge))
+        await reply_callback(event, _challenge_text(challenge, user_id), _challenge_detail_markup(challenge, user_id))
     else:
-        await event.answer(text, reply_markup=_challenge_detail_markup(challenge))
+        await event.answer(_challenge_text(challenge, user_id), reply_markup=_challenge_detail_markup(challenge, user_id))
 
 
 @router.callback_query(lambda c: c.data == "settings:display")
