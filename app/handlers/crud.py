@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Any
 
 from aiogram import Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -43,6 +44,7 @@ from app.handlers.sections import (
     _task_list_keyboard,
 )
 from app.handlers.start import MAIN_MENU
+from app.repositories.users import UserRepository
 from app.services.challenge_service import ChallengeService
 from app.services.couple_service import CoupleService
 from app.services.list_service import ListService
@@ -198,8 +200,8 @@ async def cb_tasks_list(callback: CallbackQuery, context: Context, session: Any)
 
 @router.callback_query(lambda c: c.data == "tasks:create")
 async def cb_task_create_start(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
-    await _uc(context, session)
-    await state.set_data({"flow": "task_create"})
+    _, user_id = await _uc(context, session)
+    await state.set_data({"flow": "task_create", "created_by": user_id})
     await state.set_state(TaskCreateFSM.title)
     await reply_callback(callback, "Введите название задачи:", cancel_keyboard())
 
@@ -288,7 +290,20 @@ async def msg_task_due_at(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     summary = _build_task_summary(data)
     await state.set_state(TaskCreateFSM.confirm)
-    await message.answer(summary, reply_markup=inline_keyboard([[('Подтвердить', 'task:create:confirm'), ('Отмена', 'task:create:cancel')]]))
+    assigned_to = data.get("assigned_to")
+    created_by = data.get("created_by")
+    if assigned_to and assigned_to != created_by:
+        rows = [
+            [("Создать и уведомить", "task:create:confirm:notify")],
+            [("Без уведомления", "task:create:confirm:silent")],
+            [("Отмена", "task:create:cancel")],
+        ]
+    else:
+        rows = [
+            [("Создать", "task:create:confirm:silent")],
+            [("Отмена", "task:create:cancel")],
+        ]
+    await message.answer(summary, reply_markup=inline_keyboard(rows))
 
 
 def _build_task_summary(data: dict) -> str:
@@ -306,7 +321,10 @@ def _build_task_summary(data: dict) -> str:
     )
 
 
-@router.callback_query(lambda c: c.data == "task:create:confirm")
+@router.callback_query(
+    lambda c: c.data
+    and c.data in {"task:create:confirm", "task:create:confirm:notify", "task:create:confirm:silent"}
+)
 async def cb_task_create_confirm(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
     data = await state.get_data()
     if not data.get("title"):
@@ -332,8 +350,30 @@ async def cb_task_create_confirm(callback: CallbackQuery, context: Context, sess
         await session.rollback()
         await alert_callback(callback, "Не удалось создать задачу.")
         return
+    notification_failed = False
+    should_notify = callback.data == "task:create:confirm:notify"
+    if should_notify and task.assigned_to and task.assigned_to != user_id:
+        assignee = await UserRepository(session).get_by_id(task.assigned_to)
+        if assignee is not None:
+            notification = f"Тебе назначена новая задача: {task.title}"
+            if task.description:
+                notification += f"\nОписание: {task.description}"
+            if task.due_at:
+                notification += f"\nДедлайн: {_fmt_dt(task.due_at)}"
+            try:
+                await callback.bot.send_message(assignee.telegram_id, notification)
+            except TelegramAPIError:
+                notification_failed = True
+                logger.exception("Failed to notify assignee for task id=%s", task.id)
     await state.clear()
-    await reply_callback(callback, f"Задача создана: {task.title}", _task_detail_markup(task))
+    result_text = f"Задача создана: {task.title}"
+    if should_notify:
+        result_text += (
+            "\nНе удалось отправить уведомление."
+            if notification_failed
+            else "\nИсполнитель получил уведомление."
+        )
+    await reply_callback(callback, result_text, _task_detail_markup(task))
 
 
 @router.callback_query(lambda c: c.data == "task:create:cancel")
@@ -1281,6 +1321,7 @@ def _challenge_text(challenge: Any, viewer_id: int) -> str:
 
 def _challenge_detail_markup(challenge: Any, user_id: int, show_today_prompt: bool = True) -> Any:
     rows: list[list[tuple[str, str]]] = []
+    rows.append([("Статус", f"chl:status:{challenge.id}")])
     today = date.today()
     if (
         show_today_prompt
@@ -1466,16 +1507,51 @@ async def cb_challenge_create_confirm(callback: CallbackQuery, context: Context,
         return
     await state.clear()
     challenge = await ChallengeService(session).get_challenge(couple.id, user_id, challenge.id)
+    notification_failed = await _notify_challenge_partners(callback, challenge, user_id)
+    text = f"Челлендж создан.\n\n{_challenge_text(challenge, user_id)}"
+    if notification_failed:
+        text += "\n\nНе удалось отправить уведомление партнёру."
     await reply_callback(
         callback,
-        f"Челлендж создан.\n\n{_challenge_text(challenge, user_id)}",
+        text,
         _challenge_detail_markup(challenge, user_id, show_today_prompt=False),
     )
+
+
+async def _notify_challenge_partners(callback: CallbackQuery, challenge: Any, creator_id: int) -> bool:
+    if challenge.scope != "COUPLE":
+        return False
+    failed = False
+    for participant in challenge.participants:
+        if participant.user_id == creator_id or participant.user is None:
+            continue
+        try:
+            await callback.bot.send_message(
+                participant.user.telegram_id,
+                f"Появился общий челлендж: {challenge.title}",
+                reply_markup=inline_keyboard([[("Посмотреть статус", f"chl:status:{challenge.id}")]]),
+            )
+        except TelegramAPIError:
+            failed = True
+            logger.exception(
+                "Failed to notify participant id=%s about challenge id=%s",
+                participant.user_id,
+                challenge.id,
+            )
+    return failed
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("chl:") and c.data.split(":")[1].isdigit())
 async def cb_challenge_detail(callback: CallbackQuery, context: Context, session: Any) -> None:
     challenge_id = callback_int(callback.data.split(":")[1])
+    couple, user_id = await _uc(context, session)
+    challenge = await ChallengeService(session).get_challenge(couple.id, user_id, challenge_id)
+    await reply_callback(callback, _challenge_text(challenge, user_id), _challenge_detail_markup(challenge, user_id))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("chl:status:"))
+async def cb_challenge_status(callback: CallbackQuery, context: Context, session: Any) -> None:
+    challenge_id = callback_int(callback.data.split(":")[2])
     couple, user_id = await _uc(context, session)
     challenge = await ChallengeService(session).get_challenge(couple.id, user_id, challenge_id)
     await reply_callback(callback, _challenge_text(challenge, user_id), _challenge_detail_markup(challenge, user_id))

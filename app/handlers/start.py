@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from html import escape
 
 from aiogram import Router
 from aiogram.filters import Command
@@ -43,6 +44,29 @@ MAIN_MENU = ReplyKeyboardMarkup(
 )
 
 
+def _invite_message(couple_name: str, code: str, bot_username: str | None) -> str:
+    if bot_username:
+        action = (
+            "Нажми на ссылку, чтобы открыть бота и сразу присоединиться:\n"
+            f"https://t.me/{bot_username}?start=join_{code}"
+        )
+    else:
+        action = f"Открой этого бота и отправь:\n<pre>/join {code}</pre>"
+    return (
+        f"Тебя приглашают в общее пространство «{escape(couple_name)}» — "
+        "для задач, списков, фильмов, поездок и заметок.\n\n"
+        f"{action}\n\n"
+        "Приглашение действует 48 часов."
+    )
+
+
+async def _get_bot_username(callback: CallbackQuery) -> str | None:
+    bot = callback.bot
+    if bot is None:
+        return None
+    return (await bot.get_me()).username
+
+
 @router.message(Command("start"))
 async def cmd_start(message: Message, context: Context, session: AsyncSession, state: FSMContext) -> None:
     await state.clear()
@@ -57,6 +81,30 @@ async def cmd_start(message: Message, context: Context, session: AsyncSession, s
     )
     user = result["user"]
     couple = result["couple"]
+
+    payload = (message.text or "").split(maxsplit=1)
+    if len(payload) == 2 and payload[1].startswith("join_"):
+        code = payload[1].removeprefix("join_").strip().upper()
+        invited_couple = await service._couple_service.find_couple_by_code(code)
+        if invited_couple is None:
+            await message.answer("Приглашение недействительно или уже истекло.")
+            return
+        try:
+            member = await service._couple_service.join_couple(user, invited_couple)
+        except DomainError as exc:
+            await message.answer(exc.message)
+            return
+        if member is None:
+            await message.answer(
+                f"Ты уже состоишь в паре «{invited_couple.name}».",
+                reply_markup=MAIN_MENU,
+            )
+            return
+        await message.answer(
+            f"Готово! Ты присоединился к паре «{invited_couple.name}».",
+            reply_markup=MAIN_MENU,
+        )
+        return
 
     name = user.display_name or user.first_name or user.username or f"User{user.id}"
     if couple is None:
@@ -97,10 +145,12 @@ async def cb_create_couple(
     except Conflict:
         await alert_callback(callback, "Вы уже состоите в паре.")
         return
+    bot_username = await _get_bot_username(callback)
     await reply_callback(
         callback,
-        f"Пара «{couple.name}» создана!\nКод приглашения: {couple.invite_code}",
+        _invite_message(couple.name, couple.invite_code, bot_username),
         MAIN_MENU,
+        parse_mode="HTML",
     )
 
 
@@ -171,7 +221,12 @@ async def cb_show_code(
     if not code:
         await alert_callback(callback, "Код приглашения недоступен. Создайте новый код в разделе «О паре».")
         return
-    await reply_callback(callback, f"Код приглашения: {code}")
+    bot_username = await _get_bot_username(callback)
+    await reply_callback(
+        callback,
+        _invite_message(couple.name, code, bot_username),
+        parse_mode="HTML",
+    )
 
 
 @router.callback_query(lambda c: c.data == "couple:regenerate_code")
@@ -190,7 +245,12 @@ async def cb_regenerate_code(callback: CallbackQuery, context: Context, session:
     except Conflict as exc:
         await alert_callback(callback, exc.message)
         return
-    await reply_callback(callback, f"Новый код приглашения: {code}")
+    bot_username = await _get_bot_username(callback)
+    await reply_callback(
+        callback,
+        _invite_message(couple.name, code, bot_username),
+        parse_mode="HTML",
+    )
 
 
 @router.callback_query(lambda c: c.data == "couple:leave_confirm")

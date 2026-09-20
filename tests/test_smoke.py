@@ -8,6 +8,7 @@ from sqlalchemy import inspect
 
 from app.database import SessionLocal, engine, init_database
 from app.handlers.crud import router as crud_router
+from app.handlers.start import _invite_message
 from app.services.challenge_service import ChallengeService
 from app.services.couple_service import CoupleService
 
@@ -22,6 +23,22 @@ async def test_database_schema_and_crud_router_are_available() -> None:
     assert {"users", "couples", "tasks", "movies", "lists", "challenges"} <= table_names
     assert crud_router.message.handlers
     assert crud_router.callback_query.handlers
+
+
+def test_invite_message_is_self_contained() -> None:
+    text = _invite_message("Наша пара", "ABCD-1234", "couple_test_bot")
+
+    assert "приглашают в общее пространство «Наша пара»" in text
+    assert "задач, списков, фильмов, поездок и заметок" in text
+    assert "https://t.me/couple_test_bot?start=join_ABCD-1234" in text
+    assert "48 часов" in text
+
+
+def test_invite_message_has_copyable_fallback_and_escapes_name() -> None:
+    text = _invite_message("Мы <3", "ABCD-1234", None)
+
+    assert "Мы &lt;3" in text
+    assert "<pre>/join ABCD-1234</pre>" in text
 
 
 async def test_challenge_savings_stats_and_entry_update() -> None:

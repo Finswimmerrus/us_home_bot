@@ -89,12 +89,13 @@ async def reply_callback(
     callback: CallbackQuery,
     text: str,
     reply_markup: InlineKeyboardMarkup | ReplyKeyboardMarkup | None = None,
+    parse_mode: str | None = None,
 ) -> None:
     await answer_callback(callback)
     message = get_callback_message(callback)
     if message is not None:
         try:
-            await message.answer(text, reply_markup=reply_markup)
+            await message.answer(text, reply_markup=reply_markup, parse_mode=parse_mode)
         except TelegramAPIError:
             logger.exception("Failed to send callback reply message")
 
