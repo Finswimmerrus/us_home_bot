@@ -7,10 +7,14 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
+.cache/
 backups/
+build/
 venv/
 .venv/
 *.egg-info/
 *.db
+*.db.pre-deploy
 *.log
 .tmp/
+.deployed-commit
