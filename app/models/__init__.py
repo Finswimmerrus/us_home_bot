@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.models.challenge import Challenge, ChallengeEntry, ChallengeParticipant
 from app.models.couple import Couple
 from app.models.couple_member import CoupleMember
 from app.models.list import List
@@ -16,6 +17,9 @@ __all__ = [
     "User",
     "Couple",
     "CoupleMember",
+    "Challenge",
+    "ChallengeParticipant",
+    "ChallengeEntry",
     "Task",
     "Movie",
     "MovieRating",

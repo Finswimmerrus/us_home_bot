@@ -7,6 +7,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.challenge_service import ChallengeService
 from app.services.list_service import ListService
 from app.services.movie_service import MovieService
 from app.services.note_service import NoteService
@@ -30,6 +31,7 @@ SECTION_LABELS = {
     "Путешествия",
     "Вишлист",
     "Заметки",
+    "Челленджи",
     "Настройки",
 }
 
@@ -85,6 +87,15 @@ def _format_notes(items: list[Any]) -> str:
     return "Заметки:\n" + "\n".join(f"• {item.title}" for item in items)
 
 
+def _format_challenges(items: list[Any]) -> str:
+    if not items:
+        return "Челленджей пока нет.\nНажми «Создать челлендж»."
+    return "Челленджи:\n" + "\n".join(
+        f"• {item.title} — {_format_date(item.start_date)}–{_format_date(item.end_date)}"
+        for item in items
+    )
+
+
 def _task_list_keyboard(items: list[Any]) -> Any:
     rows: list[list[tuple[str, str]]] = [[("Добавить задачу", "tasks:create")]]
     rows += [[(item.title, f"task:{item.id}")] for item in items]
@@ -121,6 +132,12 @@ def _note_list_keyboard(items: list[Any]) -> Any:
     return inline_keyboard(rows)
 
 
+def _challenge_list_keyboard(items: list[Any]) -> Any:
+    rows: list[list[tuple[str, str]]] = [[("Создать челлендж", "challenges:create")]]
+    rows += [[(item.title[:40], f"chl:{item.id}")] for item in items]
+    return inline_keyboard(rows)
+
+
 @router.message(lambda message: message.text in SECTION_LABELS)
 async def show_section(message: Message, context: Context, session: AsyncSession, state: FSMContext) -> None:
     await state.clear()
@@ -151,6 +168,9 @@ async def show_section(message: Message, context: Context, session: AsyncSession
     elif section == "Заметки":
         items = await NoteService(session).get_all_notes(couple.id, user_id, limit=20)
         await message.answer(_format_notes(items), reply_markup=_note_list_keyboard(items))
+    elif section == "Челленджи":
+        items = await ChallengeService(session).list_challenges(couple.id, user_id)
+        await message.answer(_format_challenges(items), reply_markup=_challenge_list_keyboard(items))
     else:
         user_settings = await SettingsService(session).get_user_settings(user_id)
         couple_settings = await SettingsService(session).get_couple_settings(couple.id, user_id)

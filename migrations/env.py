@@ -19,6 +19,7 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
+from app.models.challenge import Challenge, ChallengeEntry, ChallengeParticipant  # noqa: E402
 from app.models.couple import Couple  # noqa: E402
 from app.models.couple_member import CoupleMember  # noqa: E402
 from app.models.list import List  # noqa: E402

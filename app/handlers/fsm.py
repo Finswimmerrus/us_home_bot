@@ -51,6 +51,20 @@ class NoteCreateFSM(StatesGroup):
     content = State()
 
 
+class ChallengeCreateFSM(StatesGroup):
+    title = State()
+    scope = State()
+    challenge_type = State()
+    start_date = State()
+    end_date = State()
+    daily_amount = State()
+    confirm = State()
+
+
+class ChallengeEntryFSM(StatesGroup):
+    spent_amount = State()
+
+
 class SettingsDisplayFSM(StatesGroup):
     display_name = State()
 

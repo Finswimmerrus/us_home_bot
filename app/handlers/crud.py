@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 from aiogram import Router
@@ -12,6 +13,8 @@ from sqlalchemy.exc import IntegrityError
 
 from app.exceptions import ValidationError
 from app.handlers.fsm import (
+    ChallengeCreateFSM,
+    ChallengeEntryFSM,
     CoupleNameFSM,
     ListCreateFSM,
     ListItemCreateFSM,
@@ -29,6 +32,8 @@ from app.handlers.fsm import (
     WishlistCreateFSM,
 )
 from app.handlers.sections import (
+    _challenge_list_keyboard,
+    _format_challenges,
     _format_lists,
     _format_movies,
     _format_notes,
@@ -38,6 +43,7 @@ from app.handlers.sections import (
     _task_list_keyboard,
 )
 from app.handlers.start import MAIN_MENU
+from app.services.challenge_service import ChallengeService
 from app.services.couple_service import CoupleService
 from app.services.list_service import ListService
 from app.services.movie_service import VALID_MOVIE_STATUSES, MovieService
@@ -1189,6 +1195,348 @@ async def cb_note_delete(callback: CallbackQuery, context: Context, session: Any
     couple, user_id = await _uc(context, session)
     await NoteService(session).delete_note(couple.id, user_id, note_id)
     await reply_callback(callback, "Заметка удалена.", back_to_menu_keyboard())
+
+
+CHALLENGE_SCOPE_LABELS = {"PERSONAL": "Личный", "COUPLE": "Вместе"}
+CHALLENGE_TYPE_LABELS = {"SIMPLE": "Обычный", "SAVINGS": "С экономией"}
+
+
+def _money(value: Decimal | None) -> str:
+    amount = (value or Decimal("0.00")).quantize(Decimal("0.01"))
+    text = f"{amount:,.2f}".replace(",", " ").replace(".00", "")
+    return f"{text} ₽"
+
+
+def _challenge_progress(challenge: Any, participant_id: int, today: date) -> str:
+    entries = {
+        entry.entry_date: entry.status
+        for entry in challenge.entries
+        if entry.user_id == participant_id
+    }
+    total_days = (challenge.end_date - challenge.start_date).days + 1
+    symbols: list[str] = []
+    max_days = min(total_days, 62)
+    for offset in range(max_days):
+        day = challenge.start_date + timedelta(days=offset)
+        status = entries.get(day)
+        if status == "SUCCESS":
+            symbols.append("🟩")
+        elif status == "MISSED":
+            symbols.append("⬜")
+        else:
+            symbols.append("·")
+    if total_days > max_days:
+        symbols.append("…")
+    return "".join(symbols)
+
+
+def _user_name(user: Any | None, fallback: str) -> str:
+    if user is None:
+        return fallback
+    return user.display_name or user.first_name or user.username or fallback
+
+
+def _challenge_text(challenge: Any, viewer_id: int) -> str:
+    today = date.today()
+    participant_by_id = {participant.user_id: participant for participant in challenge.participants}
+    lines = [
+        challenge.title,
+        f"{challenge.start_date.strftime('%d.%m')}–{challenge.end_date.strftime('%d.%m')}",
+        "",
+    ]
+    visible_participants = challenge.participants
+    if challenge.scope == "PERSONAL":
+        visible_participants = [participant_by_id[viewer_id]]
+    for participant in visible_participants:
+        name = _user_name(participant.user, str(participant.user_id))
+        lines.append(f"{name}:")
+        lines.append(_challenge_progress(challenge, participant.user_id, today))
+        lines.append("")
+    if challenge.challenge_type == "SAVINGS":
+        stats = ChallengeService.calculate_stats(challenge, today)
+        lines.append(f"Потрачено: {_money(stats.actual_spending)}")
+        if stats.calculated_savings >= 0:
+            lines.append(f"Расчётная экономия: {_money(stats.calculated_savings)}")
+        else:
+            lines.append(f"Перерасход: {_money(abs(stats.calculated_savings))}")
+    return "\n".join(lines).strip()
+
+
+def _challenge_detail_markup(challenge: Any) -> Any:
+    rows = [
+        [("Сегодня получилось", f"chl:ok:{challenge.id}")],
+        [("Сегодня не получилось", f"chl:miss:{challenge.id}")],
+    ]
+    yesterday = date.today() - timedelta(days=1)
+    if challenge.start_date <= yesterday <= challenge.end_date:
+        rows.append(
+            [
+                ("Вчера получилось", f"chl:yok:{challenge.id}"),
+                ("Вчера нет", f"chl:ymiss:{challenge.id}"),
+            ]
+        )
+    rows.append([("Назад", "challenges:list")])
+    return inline_keyboard(rows)
+
+
+def _challenge_summary(data: dict[str, Any]) -> str:
+    lines = [
+        "Создать челлендж:",
+        f"Название: {data.get('title')}",
+        f"Формат: {CHALLENGE_SCOPE_LABELS.get(data.get('scope'), '-')}",
+        f"Тип: {CHALLENGE_TYPE_LABELS.get(data.get('challenge_type'), '-')}",
+        f"Начало: {data.get('start_date')}",
+        f"Окончание: {data.get('end_date')}",
+    ]
+    if data.get("challenge_type") == "SAVINGS":
+        lines.append(f"Сумма в день: {_money(Decimal(data.get('daily_amount', '0')))}")
+    return "\n".join(lines)
+
+
+@router.callback_query(lambda c: c.data == "challenges:list")
+async def cb_challenges_list(callback: CallbackQuery, context: Context, session: Any) -> None:
+    couple, user_id = await _uc(context, session)
+    items = await ChallengeService(session).list_challenges(couple.id, user_id)
+    await reply_callback(callback, _format_challenges(items), _challenge_list_keyboard(items))
+
+
+@router.callback_query(lambda c: c.data == "challenges:create")
+async def cb_challenge_create_start(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
+    await _uc(context, session)
+    await state.set_data({"flow": "challenge_create"})
+    await state.set_state(ChallengeCreateFSM.title)
+    await reply_callback(callback, "Введите название челленджа:", cancel_keyboard())
+
+
+@router.message(ChallengeCreateFSM.title)
+async def msg_challenge_title(message: Message, state: FSMContext) -> None:
+    text = _norm(message.text)
+    if not text:
+        await message.answer("Введите название челленджа.")
+        return
+    await state.update_data(title=text)
+    await state.set_state(ChallengeCreateFSM.scope)
+    await message.answer(
+        "Для кого челлендж?",
+        reply_markup=inline_keyboard(
+            [[("Личный", "chl:new:scope:PERSONAL"), ("Вместе", "chl:new:scope:COUPLE")]]
+        ),
+    )
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("chl:new:scope:"))
+async def cb_challenge_scope(callback: CallbackQuery, state: FSMContext) -> None:
+    scope = callback.data.split(":")[-1]
+    await state.update_data(scope=scope)
+    await state.set_state(ChallengeCreateFSM.challenge_type)
+    await reply_callback(
+        callback,
+        "Тип челленджа:",
+        inline_keyboard(
+            [[("Обычный", "chl:new:type:SIMPLE"), ("С экономией", "chl:new:type:SAVINGS")]]
+        ),
+    )
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("chl:new:type:"))
+async def cb_challenge_type(callback: CallbackQuery, state: FSMContext) -> None:
+    challenge_type = callback.data.split(":")[-1]
+    await state.update_data(challenge_type=challenge_type)
+    await state.set_state(ChallengeCreateFSM.start_date)
+    await reply_callback(
+        callback,
+        "Дата начала (дд.мм.гггг):",
+        inline_keyboard([[("Сегодня", "chl:new:start:today")]]),
+    )
+
+
+@router.callback_query(lambda c: c.data == "chl:new:start:today")
+async def cb_challenge_start_today(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(start_date=date.today().isoformat())
+    await state.set_state(ChallengeCreateFSM.end_date)
+    await reply_callback(callback, "Дата окончания (дд.мм.гггг):", cancel_keyboard())
+
+
+@router.message(ChallengeCreateFSM.start_date)
+async def msg_challenge_start_date(message: Message, state: FSMContext) -> None:
+    start = _parse_date(message.text)
+    if start is None:
+        await message.answer("Введите дату в формате дд.мм.гггг.")
+        return
+    await state.update_data(start_date=start.isoformat())
+    await state.set_state(ChallengeCreateFSM.end_date)
+    await message.answer("Дата окончания (дд.мм.гггг):", reply_markup=cancel_keyboard())
+
+
+@router.message(ChallengeCreateFSM.end_date)
+async def msg_challenge_end_date(message: Message, state: FSMContext) -> None:
+    end = _parse_date(message.text)
+    if end is None:
+        await message.answer("Введите дату в формате дд.мм.гггг.")
+        return
+    data = await state.get_data()
+    start = date.fromisoformat(data["start_date"])
+    if end < start:
+        await message.answer("Дата окончания не может быть раньше даты начала.")
+        return
+    await state.update_data(end_date=end.isoformat())
+    if data.get("challenge_type") == "SAVINGS":
+        await state.set_state(ChallengeCreateFSM.daily_amount)
+        await message.answer("Сколько обычно тратится в день? Например: 300", reply_markup=cancel_keyboard())
+        return
+    data = await state.get_data()
+    await state.set_state(ChallengeCreateFSM.confirm)
+    await message.answer(
+        _challenge_summary(data),
+        reply_markup=inline_keyboard([[("Создать", "chl:new:confirm")], [("Отмена", "chl:new:cancel")]]),
+    )
+
+
+@router.message(ChallengeCreateFSM.daily_amount)
+async def msg_challenge_daily_amount(message: Message, state: FSMContext) -> None:
+    try:
+        amount = ChallengeService.normalize_money(message.text)
+    except ValidationError as exc:
+        await message.answer(exc.message)
+        return
+    if amount is None:
+        await message.answer("Введите сумму на день.")
+        return
+    await state.update_data(daily_amount=str(amount))
+    data = await state.get_data()
+    await state.set_state(ChallengeCreateFSM.confirm)
+    await message.answer(
+        _challenge_summary(data),
+        reply_markup=inline_keyboard([[("Создать", "chl:new:confirm")], [("Отмена", "chl:new:cancel")]]),
+    )
+
+
+@router.callback_query(lambda c: c.data == "chl:new:cancel")
+async def cb_challenge_create_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await reply_callback(callback, "Отменено.", MAIN_MENU)
+
+
+@router.callback_query(lambda c: c.data == "chl:new:confirm")
+async def cb_challenge_create_confirm(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
+    data = await state.get_data()
+    couple, user_id = await _uc(context, session)
+    try:
+        challenge = await ChallengeService(session).create_challenge(
+            couple_id=couple.id,
+            created_by=user_id,
+            title=_norm(data.get("title")),
+            scope=data.get("scope"),
+            challenge_type=data.get("challenge_type"),
+            start_date=date.fromisoformat(data["start_date"]),
+            end_date=date.fromisoformat(data["end_date"]),
+            daily_amount=Decimal(data["daily_amount"]) if data.get("daily_amount") else None,
+        )
+    except ValidationError as exc:
+        await alert_callback(callback, exc.message)
+        return
+    await state.clear()
+    await reply_callback(callback, f"Челлендж «{challenge.title}» создан.", _challenge_detail_markup(challenge))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("chl:") and c.data.split(":")[1].isdigit())
+async def cb_challenge_detail(callback: CallbackQuery, context: Context, session: Any) -> None:
+    challenge_id = callback_int(callback.data.split(":")[1])
+    couple, user_id = await _uc(context, session)
+    challenge = await ChallengeService(session).get_challenge(couple.id, user_id, challenge_id)
+    await reply_callback(callback, _challenge_text(challenge, user_id), _challenge_detail_markup(challenge))
+
+
+async def _record_challenge_status(
+    callback: CallbackQuery,
+    context: Context,
+    session: Any,
+    state: FSMContext,
+    status: str,
+    entry_date: date,
+) -> None:
+    challenge_id = callback_int(callback.data.split(":")[2])
+    couple, user_id = await _uc(context, session)
+    service = ChallengeService(session)
+    challenge = await service.get_challenge(couple.id, user_id, challenge_id)
+    if status == "MISSED" and challenge.challenge_type == "SAVINGS":
+        await state.set_data(
+            {
+                "flow": "challenge_entry",
+                "challenge_id": challenge.id,
+                "entry_date": entry_date.isoformat(),
+            }
+        )
+        await state.set_state(ChallengeEntryFSM.spent_amount)
+        quick = str(challenge.daily_amount or Decimal("0.00"))
+        await reply_callback(
+            callback,
+            "Сколько потратили?",
+            inline_keyboard([[(_money(challenge.daily_amount), f"chl:spend:{quick}")]]),
+        )
+        return
+    try:
+        await service.record_entry(couple.id, user_id, challenge.id, entry_date, status)
+    except ValidationError as exc:
+        await alert_callback(callback, exc.message)
+        return
+    challenge = await service.get_challenge(couple.id, user_id, challenge.id)
+    await reply_callback(callback, "Отметка сохранена.", _challenge_detail_markup(challenge))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("chl:ok:"))
+async def cb_challenge_success(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
+    await _record_challenge_status(callback, context, session, state, "SUCCESS", date.today())
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("chl:miss:"))
+async def cb_challenge_missed(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
+    await _record_challenge_status(callback, context, session, state, "MISSED", date.today())
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("chl:yok:"))
+async def cb_challenge_yesterday_success(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
+    await _record_challenge_status(callback, context, session, state, "SUCCESS", date.today() - timedelta(days=1))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("chl:ymiss:"))
+async def cb_challenge_yesterday_missed(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
+    await _record_challenge_status(callback, context, session, state, "MISSED", date.today() - timedelta(days=1))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("chl:spend:"))
+async def cb_challenge_spend_quick(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
+    amount = callback.data.split(":", 2)[2]
+    await _save_challenge_spend(callback, context, session, state, amount)
+
+
+@router.message(ChallengeEntryFSM.spent_amount)
+async def msg_challenge_spend(message: Message, context: Context, session: Any, state: FSMContext) -> None:
+    await _save_challenge_spend(message, context, session, state, message.text)
+
+
+async def _save_challenge_spend(event: CallbackQuery | Message, context: Context, session: Any, state: FSMContext, amount_text: str | None) -> None:
+    data = await state.get_data()
+    challenge_id = callback_int(data.get("challenge_id"))
+    entry_date = date.fromisoformat(data["entry_date"])
+    couple, user_id = await _uc(context, session)
+    service = ChallengeService(session)
+    try:
+        amount = ChallengeService.normalize_money(amount_text)
+        await service.record_entry(couple.id, user_id, challenge_id, entry_date, "MISSED", amount)
+    except ValidationError as exc:
+        if isinstance(event, CallbackQuery):
+            await alert_callback(event, exc.message)
+        else:
+            await event.answer(exc.message)
+        return
+    await state.clear()
+    challenge = await service.get_challenge(couple.id, user_id, challenge_id)
+    text = "Отметка сохранена."
+    if isinstance(event, CallbackQuery):
+        await reply_callback(event, text, _challenge_detail_markup(challenge))
+    else:
+        await event.answer(text, reply_markup=_challenge_detail_markup(challenge))
 
 
 @router.callback_query(lambda c: c.data == "settings:display")
