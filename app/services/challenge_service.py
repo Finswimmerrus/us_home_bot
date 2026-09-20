@@ -7,7 +7,7 @@ from decimal import Decimal, InvalidOperation
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.exceptions import Forbidden, NotFound, ValidationError
-from app.models.challenge import Challenge, ChallengeEntry
+from app.models.challenge import Challenge, ChallengeEntry, ChallengeParticipant
 from app.repositories.challenges import ChallengeRepository
 from app.repositories.users import CoupleMemberRepository
 
@@ -70,16 +70,14 @@ class ChallengeService:
         amount = None
         participant_amounts: dict[int, Decimal] | None = None
         if challenge_type == "SAVINGS":
-            participant_amounts = {}
             raw_amounts = participant_daily_amounts or {}
-            for participant_id in participant_ids:
-                participant_amount = self.normalize_money(raw_amounts.get(participant_id, daily_amount))
-                if participant_amount is None:
-                    raise ValidationError("Введите сумму на день для каждого участника.", field="daily_amount")
-                participant_amounts[participant_id] = participant_amount
-            amount = self.normalize_money(daily_amount)
-            if amount is None and participant_amounts:
-                amount = sum(participant_amounts.values(), Decimal("0.00")) / Decimal(len(participant_amounts))
+            creator_amount = self.normalize_money(
+                raw_amounts.get(created_by, daily_amount)
+            )
+            if creator_amount is None:
+                raise ValidationError("Введите свою сумму на день.", field="daily_amount")
+            participant_amounts = {created_by: creator_amount}
+            amount = creator_amount
         elif daily_amount is not None:
             raise ValidationError("Сумма нужна только для челленджа с экономией.", field="daily_amount")
 
@@ -145,6 +143,28 @@ class ChallengeService:
             spent_amount=amount,
         )
 
+    async def set_daily_amount(
+        self,
+        couple_id: int,
+        user_id: int,
+        challenge_id: int,
+        daily_amount: Decimal | str | int | None,
+    ) -> ChallengeParticipant:
+        challenge = await self.get_challenge(couple_id, user_id, challenge_id)
+        if challenge.challenge_type != "SAVINGS":
+            raise ValidationError("Сумма на день есть только в челлендже с экономией.", field="daily_amount")
+        amount = self.normalize_money(daily_amount)
+        if amount is None:
+            raise ValidationError("Введите сумму на день.", field="daily_amount")
+        participant = await self._challenge_repo.set_participant_daily_amount(
+            challenge.id,
+            user_id,
+            amount,
+        )
+        if participant is None:
+            raise Forbidden("update challenge amount", {"challenge_id": challenge_id, "user_id": user_id})
+        return participant
+
     @staticmethod
     def calculate_stats(challenge: Challenge, today: date | None = None) -> ChallengeStats:
         today = today or date.today()
@@ -159,11 +179,7 @@ class ChallengeService:
             if entry.user_id in participant_ids and entry.entry_date <= elapsed_until
         )
         expected_per_day = sum(
-            (
-                participant.daily_amount
-                if participant.daily_amount is not None
-                else challenge.daily_amount or Decimal("0.00")
-            )
+            participant.daily_amount or Decimal("0.00")
             for participant in challenge.participants
             if participant.user_id in participant_ids
         )

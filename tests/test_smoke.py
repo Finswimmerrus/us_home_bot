@@ -89,3 +89,54 @@ async def test_challenge_savings_stats_and_entry_update() -> None:
     assert stats.expected_amount_to_date == Decimal("600.00")
     assert stats.actual_spending == Decimal("150.00")
     assert stats.calculated_savings == Decimal("450.00")
+
+
+async def test_couple_savings_challenge_partner_sets_own_amount_later() -> None:
+    async with SessionLocal() as session:
+        couple_service = CoupleService(session)
+        suffix = uuid4().int % 1_000_000_000
+        owner = await couple_service.get_or_create_user(
+            telegram_id=920_000_000_000 + suffix,
+            first_name="Owner",
+        )
+        partner = await couple_service.get_or_create_user(
+            telegram_id=930_000_000_000 + suffix,
+            first_name="Partner",
+        )
+        couple, _ = await couple_service.create_couple(owner, name=f"Pair {suffix}")
+        await couple_service.join_couple(partner, couple)
+
+        service = ChallengeService(session)
+        start = date.today()
+        challenge = await service.create_challenge(
+            couple.id,
+            owner.id,
+            "Не покупать кофе",
+            "COUPLE",
+            "SAVINGS",
+            start,
+            start + timedelta(days=2),
+            Decimal("300"),
+        )
+
+        owner_view = await service.get_challenge(couple.id, owner.id, challenge.id)
+        partner_view = await service.get_challenge(couple.id, partner.id, challenge.id)
+        partner_participant = next(
+            participant
+            for participant in partner_view.participants
+            if participant.user_id == partner.id
+        )
+        stats = ChallengeService.calculate_stats(partner_view, start)
+
+        assert {participant.user_id for participant in owner_view.participants} == {
+            owner.id,
+            partner.id,
+        }
+        assert partner_participant.daily_amount is None
+        assert stats.expected_amount_to_date == Decimal("300.00")
+
+        await service.set_daily_amount(couple.id, partner.id, challenge.id, Decimal("150"))
+        updated = await service.get_challenge(couple.id, partner.id, challenge.id)
+        updated_stats = ChallengeService.calculate_stats(updated, start)
+
+    assert updated_stats.expected_amount_to_date == Decimal("450.00")

@@ -122,3 +122,22 @@ class ChallengeRepository:
         await self._session.flush()
         await self._session.refresh(entry)
         return entry
+
+    async def set_participant_daily_amount(
+        self,
+        challenge_id: int,
+        user_id: int,
+        daily_amount: Decimal,
+    ) -> ChallengeParticipant | None:
+        stmt = select(ChallengeParticipant).where(
+            ChallengeParticipant.challenge_id == challenge_id,
+            ChallengeParticipant.user_id == user_id,
+        )
+        result = await self._session.execute(stmt)
+        participant = result.scalar_one_or_none()
+        if participant is None:
+            return None
+        participant.daily_amount = daily_amount
+        await self._session.flush()
+        await self._session.refresh(participant)
+        return participant

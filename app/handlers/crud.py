@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.exceptions import ValidationError
 from app.handlers.fsm import (
+    ChallengeAmountFSM,
     ChallengeCreateFSM,
     ChallengeEntryFSM,
     CoupleNameFSM,
@@ -1342,11 +1343,11 @@ def _user_name(user: Any | None, fallback: str) -> str:
     return user.display_name or user.first_name or user.username or fallback
 
 
-def _participant_daily_amount(challenge: Any, user_id: int) -> Decimal:
+def _participant_daily_amount(challenge: Any, user_id: int) -> Decimal | None:
     for participant in challenge.participants:
         if participant.user_id == user_id:
-            return participant.daily_amount or challenge.daily_amount or Decimal("0.00")
-    return challenge.daily_amount or Decimal("0.00")
+            return participant.daily_amount
+    return None
 
 
 def _challenge_entry(challenge: Any, user_id: int, entry_date: date) -> Any | None:
@@ -1396,7 +1397,9 @@ def _challenge_text(challenge: Any, viewer_id: int, today: date) -> str:
         name = _user_name(participant.user, str(participant.user_id))
         lines.append(f"{name}:")
         if challenge.challenge_type == "SAVINGS":
-            lines.append(f"План: {_money(_participant_daily_amount(challenge, participant.user_id))} в день")
+            amount = _participant_daily_amount(challenge, participant.user_id)
+            plan = f"{_money(amount)} в день" if amount is not None else "не настроен"
+            lines.append(f"План: {plan}")
         lines.append(_challenge_progress(challenge, participant.user_id, today))
         lines.append("")
     if challenge.challenge_type == "SAVINGS":
@@ -1416,6 +1419,8 @@ def _challenge_detail_markup(
     show_today_prompt: bool = True,
 ) -> Any:
     rows: list[list[tuple[str, str]]] = []
+    if challenge.challenge_type == "SAVINGS" and _participant_daily_amount(challenge, user_id) is None:
+        rows.append([("💰 Настроить план", f"chl:amount:{challenge.id}")])
     if (
         show_today_prompt
         and challenge.start_date <= today <= challenge.end_date
@@ -1460,7 +1465,10 @@ def _challenge_summary(data: dict[str, Any]) -> str:
             for participant in participant_plans:
                 user_id = participant["user_id"]
                 amount = participant_amounts.get(user_id) or participant_amounts.get(str(user_id))
-                lines.append(f"- {participant['name']}: {_money(Decimal(str(amount or '0')))}")
+                if amount is None:
+                    lines.append(f"- {participant['name']}: настроит отдельно")
+                else:
+                    lines.append(f"- {participant['name']}: {_money(Decimal(str(amount)))}")
     return "\n".join(lines)
 
 
@@ -1469,6 +1477,8 @@ async def _challenge_participant_plans(context: Context, session: Any, scope: st
     members = await CoupleMemberRepository(session).get_members(couple.id)
     if scope == "PERSONAL":
         members = [member for member in members if member.user_id == user_id]
+    else:
+        members = sorted(members, key=lambda member: member.user_id != user_id)
     plans = []
     for member in members:
         plans.append(
@@ -1484,7 +1494,8 @@ async def _ask_next_challenge_amount(event: CallbackQuery | Message, state: FSMC
     data = await state.get_data()
     participant_plans = data.get("participant_plans") or []
     index = int(data.get("participant_amount_index", 0))
-    if index >= len(participant_plans):
+    required_amount_count = 1 if data.get("challenge_type") == "SAVINGS" else len(participant_plans)
+    if index >= min(len(participant_plans), required_amount_count):
         await state.set_state(ChallengeCreateFSM.confirm)
         text = _challenge_summary(data)
         markup = inline_keyboard([[("➕ Создать челлендж", "chl:new:confirm")], [("Отмена", "chl:new:cancel")]])
@@ -1493,8 +1504,7 @@ async def _ask_next_challenge_amount(event: CallbackQuery | Message, state: FSMC
         else:
             await event.answer(text, reply_markup=markup)
         return
-    name = participant_plans[index]["name"]
-    text = f"План трат для {name} в день? Например: 300"
+    text = "Ваш план трат в день? Например: 300"
     if isinstance(event, CallbackQuery):
         await reply_callback(event, text, cancel_keyboard())
     else:
@@ -1517,8 +1527,8 @@ async def cb_challenges_list(callback: CallbackQuery, context: Context, session:
 
 @router.callback_query(lambda c: c.data == "challenges:create")
 async def cb_challenge_create_start(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
-    await _uc(context, session)
-    await state.set_data({"flow": "challenge_create"})
+    _, user_id = await _uc(context, session)
+    await state.set_data({"flow": "challenge_create", "created_by": user_id})
     await state.set_state(ChallengeCreateFSM.title)
     await reply_callback(callback, "Название челленджа:", cancel_keyboard())
 
@@ -1700,8 +1710,16 @@ async def _notify_challenge_partners(callback: CallbackQuery, challenge: Any, cr
         try:
             await callback.bot.send_message(
                 participant.user.telegram_id,
-                f"Появился общий челлендж: {challenge.title}",
-                reply_markup=inline_keyboard([[("🎯 Открыть челлендж", f"chl:status:{challenge.id}")]]),
+                (
+                    f"Появился общий челлендж: {challenge.title}"
+                    "\nОткрой его и настрой свой план на день."
+                ),
+                reply_markup=inline_keyboard(
+                    [
+                        [("💰 Настроить план", f"chl:amount:{challenge.id}")],
+                        [("🎯 Открыть челлендж", f"chl:status:{challenge.id}")],
+                    ]
+                ),
             )
         except TelegramAPIError:
             failed = True
@@ -1711,6 +1729,43 @@ async def _notify_challenge_partners(callback: CallbackQuery, challenge: Any, cr
                 challenge.id,
             )
     return failed
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("chl:amount:"))
+async def cb_challenge_amount_start(callback: CallbackQuery, context: Context, session: Any, state: FSMContext) -> None:
+    challenge_id = callback_int(callback.data.split(":")[2])
+    couple, user_id = await _uc(context, session)
+    challenge = await ChallengeService(session).get_challenge(couple.id, user_id, challenge_id)
+    if challenge.challenge_type != "SAVINGS":
+        await alert_callback(callback, "План на день есть только для экономии.")
+        return
+    await state.set_data({"flow": "challenge_amount", "challenge_id": challenge.id})
+    await state.set_state(ChallengeAmountFSM.daily_amount)
+    await reply_callback(callback, "Ваш план трат в день? Например: 300", cancel_keyboard())
+
+
+@router.message(ChallengeAmountFSM.daily_amount)
+async def msg_challenge_amount_save(message: Message, context: Context, session: Any, state: FSMContext) -> None:
+    data = await state.get_data()
+    if "challenge_id" not in data:
+        await state.clear()
+        await message.answer("Форма устарела. Откройте челлендж заново.")
+        return
+    challenge_id = callback_int(data.get("challenge_id"))
+    couple, user_id = await _uc(context, session)
+    service = ChallengeService(session)
+    try:
+        await service.set_daily_amount(couple.id, user_id, challenge_id, message.text)
+    except ValidationError as exc:
+        await message.answer(exc.message)
+        return
+    await state.clear()
+    challenge = await service.get_challenge(couple.id, user_id, challenge_id)
+    today = context.local_date()
+    await message.answer(
+        "План сохранён.\n\n" + _challenge_text(challenge, user_id, today),
+        reply_markup=_challenge_detail_markup(challenge, user_id, today),
+    )
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("chl:") and c.data.split(":")[1].isdigit())
@@ -1761,11 +1816,14 @@ async def _record_challenge_status(
         )
         await state.set_state(ChallengeEntryFSM.spent_amount)
         quick_amount = _participant_daily_amount(challenge, user_id)
-        quick = str(quick_amount)
+        rows = []
+        if quick_amount is not None:
+            quick = str(quick_amount)
+            rows.append([(_money(quick_amount), f"chl:spend:{quick}")])
         await reply_callback(
             callback,
             "Сколько потратили?",
-            inline_keyboard([[(_money(quick_amount), f"chl:spend:{quick}")]]),
+            inline_keyboard(rows) if rows else cancel_keyboard(),
         )
         return
     try:

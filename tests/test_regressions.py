@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
@@ -87,10 +87,10 @@ def test_pagination_keeps_records_after_first_page() -> None:
     page_items, page, page_count = paginate(items, 1)
 
     assert page_items == list(range(10, 20))
-    assert ("Назад", "notes:list:0") in pagination_row(
+    assert ("← Назад", "notes:list:0") in pagination_row(
         "notes:list", page, page_count
     )
-    assert ("Далее", "notes:list:2") in pagination_row(
+    assert ("Далее →", "notes:list:2") in pagination_row(
         "notes:list", page, page_count
     )
 
@@ -155,3 +155,32 @@ def test_detail_cards_include_saved_text_and_links() -> None:
     assert "Details" in crud._wish_text(item)
     assert item.url in crud._wish_text(item)
     assert "Task details" in crud._task_text(task)
+
+
+def test_challenge_text_and_actions_show_missing_savings_plan() -> None:
+    participant = SimpleNamespace(
+        user_id=1,
+        daily_amount=None,
+        user=SimpleNamespace(display_name="Partner", first_name=None, username=None),
+    )
+    challenge = SimpleNamespace(
+        id=5,
+        title="Coffee",
+        challenge_type="SAVINGS",
+        scope="COUPLE",
+        start_date=date(2026, 9, 20),
+        end_date=date(2026, 9, 22),
+        participants=[participant],
+        entries=[],
+    )
+
+    text = crud._challenge_text(challenge, 1, date(2026, 9, 20))
+    markup = crud._challenge_detail_markup(challenge, 1, date(2026, 9, 20))
+
+    assert "План: не настроен" in text
+    assert "Расчётная экономия: 0 ₽" in text
+    assert any(
+        button.text == "💰 Настроить план" and button.callback_data == "chl:amount:5"
+        for row in markup.inline_keyboard
+        for button in row
+    )

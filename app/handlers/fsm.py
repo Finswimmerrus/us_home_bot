@@ -65,6 +65,10 @@ class ChallengeEntryFSM(StatesGroup):
     spent_amount = State()
 
 
+class ChallengeAmountFSM(StatesGroup):
+    daily_amount = State()
+
+
 class SettingsDisplayFSM(StatesGroup):
     display_name = State()
 
