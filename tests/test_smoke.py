@@ -4,9 +4,11 @@ from datetime import date, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
+import pytest
 from sqlalchemy import inspect
 
 from app.database import SessionLocal, engine, init_database
+from app.exceptions import ValidationError
 from app.handlers.crud import router as crud_router
 from app.handlers.start import _invite_message
 from app.services.challenge_service import ChallengeService
@@ -89,6 +91,55 @@ async def test_challenge_savings_stats_and_entry_update() -> None:
     assert stats.expected_amount_to_date == Decimal("600.00")
     assert stats.actual_spending == Decimal("150.00")
     assert stats.calculated_savings == Decimal("450.00")
+
+
+async def test_challenge_creator_can_edit_dates_without_losing_entries() -> None:
+    async with SessionLocal() as session:
+        couple_service = CoupleService(session)
+        suffix = uuid4().int % 1_000_000_000
+        user = await couple_service.get_or_create_user(
+            telegram_id=940_000_000_000 + suffix,
+            first_name="Owner",
+        )
+        couple, _ = await couple_service.create_couple(user, name=f"Dates {suffix}")
+        service = ChallengeService(session)
+        start = date.today()
+        challenge = await service.create_challenge(
+            couple.id,
+            user.id,
+            "Exercise",
+            "PERSONAL",
+            "SIMPLE",
+            start,
+            start + timedelta(days=2),
+        )
+
+        await service.set_date(
+            couple.id,
+            user.id,
+            challenge.id,
+            "end",
+            start + timedelta(days=4),
+        )
+        await service.record_entry(
+            couple.id,
+            user.id,
+            challenge.id,
+            start,
+            "SUCCESS",
+        )
+        with pytest.raises(ValidationError, match="сохранённые отметки"):
+            await service.set_date(
+                couple.id,
+                user.id,
+                challenge.id,
+                "start",
+                start + timedelta(days=1),
+            )
+        updated = await service.get_challenge(couple.id, user.id, challenge.id)
+
+    assert updated.start_date == start
+    assert updated.end_date == start + timedelta(days=4)
 
 
 async def test_couple_savings_challenge_partner_sets_own_amount_later() -> None:

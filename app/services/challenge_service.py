@@ -165,6 +165,39 @@ class ChallengeService:
             raise Forbidden("update challenge amount", {"challenge_id": challenge_id, "user_id": user_id})
         return participant
 
+    async def set_date(
+        self,
+        couple_id: int,
+        user_id: int,
+        challenge_id: int,
+        field: str,
+        value: date,
+    ) -> Challenge:
+        challenge = await self.get_challenge(couple_id, user_id, challenge_id)
+        if challenge.created_by != user_id:
+            raise Forbidden(
+                "update challenge dates",
+                {"challenge_id": challenge_id, "user_id": user_id},
+            )
+        if field not in {"start", "end"}:
+            raise ValidationError("Неизвестная дата челленджа.", field="date")
+        start_date = value if field == "start" else challenge.start_date
+        end_date = value if field == "end" else challenge.end_date
+        if end_date < start_date:
+            raise ValidationError(
+                "Дата окончания не может быть раньше даты начала.",
+                field="date",
+            )
+        if any(
+            entry.entry_date < start_date or entry.entry_date > end_date
+            for entry in challenge.entries
+        ):
+            raise ValidationError(
+                "Новый период исключает уже сохранённые отметки.",
+                field="date",
+            )
+        return await self._challenge_repo.set_dates(challenge, start_date, end_date)
+
     @staticmethod
     def calculate_stats(challenge: Challenge, today: date | None = None) -> ChallengeStats:
         today = today or date.today()

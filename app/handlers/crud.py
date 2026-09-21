@@ -16,6 +16,7 @@ from app.exceptions import ValidationError
 from app.handlers.fsm import (
     ChallengeAmountFSM,
     ChallengeCreateFSM,
+    ChallengeDateEditFSM,
     ChallengeEntryFSM,
     CoupleNameFSM,
     ListCreateFSM,
@@ -1335,8 +1336,44 @@ def _challenge_date_keyboard(kind: str, today: date, min_date: date | None = Non
     return inline_keyboard(rows)
 
 
+def _challenge_edit_date_keyboard(
+    challenge: Any,
+    field: str,
+    today: date,
+) -> Any:
+    shortcuts = [("Сегодня", today), ("Завтра", today + timedelta(days=1))]
+    if field == "start":
+        shortcuts = [(label, value) for label, value in shortcuts if value <= challenge.end_date]
+    else:
+        shortcuts = [(label, value) for label, value in shortcuts if value >= challenge.start_date]
+    rows: list[list[tuple[str, str]]] = []
+    if shortcuts:
+        rows.append(
+            [
+                (label, f"chl:date_value:{value.isoformat()}")
+                for label, value in shortcuts
+            ]
+        )
+    rows.extend(
+        [
+            [("⌨️ Ввести дату", "chl:date_manual")],
+            [("↩️ Назад", f"chl:status:{challenge.id}")],
+        ]
+    )
+    return inline_keyboard(rows)
+
+
 def _challenge_confirm_keyboard() -> Any:
-    return inline_keyboard([[("✅ Создать челлендж", "chl:new:confirm")], [("Отмена", "chl:new:cancel")]])
+    return inline_keyboard(
+        [
+            [
+                ("📅 Изменить начало", "chl:new:edit_date:start"),
+                ("🏁 Изменить окончание", "chl:new:edit_date:end"),
+            ],
+            [("✅ Создать челлендж", "chl:new:confirm")],
+            [("Отмена", "chl:new:cancel")],
+        ]
+    )
 
 
 def _challenge_progress(challenge: Any, participant_id: int, today: date) -> str:
@@ -1446,6 +1483,13 @@ def _challenge_detail_markup(
     rows: list[list[tuple[str, str]]] = []
     if challenge.challenge_type == "SAVINGS" and _participant_daily_amount(challenge, user_id) is None:
         rows.append([("💰 Настроить план", f"chl:amount:{challenge.id}")])
+    if challenge.created_by == user_id:
+        rows.append(
+            [
+                ("📅 Начало", f"chl:date_edit:{challenge.id}:start"),
+                ("🏁 Окончание", f"chl:date_edit:{challenge.id}:end"),
+            ]
+        )
     if (
         show_today_prompt
         and challenge.start_date <= today <= challenge.end_date
@@ -1627,6 +1671,31 @@ async def cb_challenge_date_input(callback: CallbackQuery, state: FSMContext) ->
         callback,
         "Введите дату в формате дд.мм.гггг:",
         inline_keyboard([[("Отмена", "chl:new:cancel")]]),
+    )
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("chl:new:edit_date:"))
+async def cb_challenge_create_date_edit(
+    callback: CallbackQuery,
+    context: Context,
+    state: FSMContext,
+) -> None:
+    data = await state.get_data()
+    if data.get("flow") != "challenge_create":
+        await alert_callback(callback, "Форма уже закрыта.")
+        return
+    kind = (callback.data or "").rsplit(":", 1)[-1]
+    await state.set_state(
+        ChallengeCreateFSM.start_date if kind == "start" else ChallengeCreateFSM.end_date
+    )
+    min_date = None
+    if kind == "end" and data.get("start_date"):
+        min_date = date.fromisoformat(data["start_date"])
+    label = "начала" if kind == "start" else "окончания"
+    await reply_callback(
+        callback,
+        f"Выберите новую дату {label}:",
+        _challenge_date_keyboard(kind, context.local_date(), min_date=min_date),
     )
 
 
@@ -1852,6 +1921,111 @@ async def msg_challenge_amount_save(message: Message, context: Context, session:
         "План сохранён.\n\n" + _challenge_text(challenge, user_id, today),
         reply_markup=_challenge_detail_markup(challenge, user_id, today),
     )
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("chl:date_edit:"))
+async def cb_challenge_date_edit(
+    callback: CallbackQuery,
+    context: Context,
+    session: Any,
+    state: FSMContext,
+) -> None:
+    _, _, challenge_id_raw, field = (callback.data or "").split(":", 3)
+    challenge_id = callback_int(challenge_id_raw)
+    couple, user_id = await _uc(context, session)
+    challenge = await ChallengeService(session).get_challenge(couple.id, user_id, challenge_id)
+    if challenge.created_by != user_id:
+        await alert_callback(callback, "Изменять период может только создатель челленджа.")
+        return
+    await state.set_data(
+        {
+            "flow": "challenge_date_edit",
+            "challenge_id": challenge.id,
+            "date_field": field,
+        }
+    )
+    await state.set_state(ChallengeDateEditFSM.value)
+    label = "начала" if field == "start" else "окончания"
+    await reply_callback(
+        callback,
+        f"Выберите новую дату {label} или введите её в формате дд.мм.гггг:",
+        _challenge_edit_date_keyboard(challenge, field, context.local_date()),
+    )
+
+
+@router.callback_query(lambda c: c.data == "chl:date_manual")
+async def cb_challenge_date_manual(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("flow") != "challenge_date_edit":
+        await alert_callback(callback, "Форма уже закрыта.")
+        return
+    await alert_callback(callback, "Введите дату сообщением: дд.мм.гггг")
+
+
+async def _save_challenge_date(
+    event: CallbackQuery | Message,
+    value: date,
+    context: Context,
+    session: Any,
+    state: FSMContext,
+) -> None:
+    data = await state.get_data()
+    if data.get("flow") != "challenge_date_edit":
+        await state.clear()
+        if isinstance(event, CallbackQuery):
+            await alert_callback(event, "Форма уже закрыта.")
+        else:
+            await event.answer("Форма уже закрыта. Откройте челлендж заново.")
+        return
+    challenge_id = callback_int(data.get("challenge_id"))
+    couple, user_id = await _uc(context, session)
+    try:
+        await ChallengeService(session).set_date(
+            couple.id,
+            user_id,
+            challenge_id,
+            str(data.get("date_field")),
+            value,
+        )
+    except ValidationError as exc:
+        if isinstance(event, CallbackQuery):
+            await alert_callback(event, exc.message)
+        else:
+            await event.answer(exc.message)
+        return
+    await state.clear()
+    challenge = await ChallengeService(session).get_challenge(couple.id, user_id, challenge_id)
+    text = "Дата изменена.\n\n" + _challenge_text(challenge, user_id, context.local_date())
+    markup = _challenge_detail_markup(challenge, user_id, context.local_date())
+    if isinstance(event, CallbackQuery):
+        await reply_callback(event, text, markup)
+    else:
+        await event.answer(text, reply_markup=markup)
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("chl:date_value:"))
+async def cb_challenge_date_value(
+    callback: CallbackQuery,
+    context: Context,
+    session: Any,
+    state: FSMContext,
+) -> None:
+    value = date.fromisoformat((callback.data or "").rsplit(":", 1)[-1])
+    await _save_challenge_date(callback, value, context, session, state)
+
+
+@router.message(ChallengeDateEditFSM.value)
+async def msg_challenge_date_value(
+    message: Message,
+    context: Context,
+    session: Any,
+    state: FSMContext,
+) -> None:
+    value = _parse_date(message.text)
+    if value is None:
+        await message.answer("Введите дату в формате дд.мм.гггг.")
+        return
+    await _save_challenge_date(message, value, context, session, state)
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("chl:") and c.data.split(":")[1].isdigit())

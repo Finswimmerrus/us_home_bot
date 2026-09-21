@@ -201,6 +201,7 @@ def test_challenge_text_and_actions_show_missing_savings_plan() -> None:
     )
     challenge = SimpleNamespace(
         id=5,
+        created_by=1,
         title="Coffee",
         challenge_type="SAVINGS",
         scope="COUPLE",
@@ -220,13 +221,24 @@ def test_challenge_text_and_actions_show_missing_savings_plan() -> None:
         for row in markup.inline_keyboard
         for button in row
     )
+    assert any(
+        button.text == "📅 Начало" and button.callback_data == "chl:date_edit:5:start"
+        for row in markup.inline_keyboard
+        for button in row
+    )
 
 
 def test_challenge_confirmation_uses_checkmark_button() -> None:
     markup = crud._challenge_confirm_keyboard()
+    buttons = {
+        button.text: button.callback_data
+        for row in markup.inline_keyboard
+        for button in row
+    }
 
-    assert markup.inline_keyboard[0][0].text == "✅ Создать челлендж"
-    assert markup.inline_keyboard[0][0].callback_data == "chl:new:confirm"
+    assert buttons["✅ Создать челлендж"] == "chl:new:confirm"
+    assert buttons["📅 Изменить начало"] == "chl:new:edit_date:start"
+    assert buttons["🏁 Изменить окончание"] == "chl:new:edit_date:end"
 
 
 def test_challenge_date_keyboard_offers_shortcuts_and_manual_input() -> None:
@@ -280,4 +292,8 @@ async def test_savings_amount_moves_to_confirmation() -> None:
     assert message.answer.await_count == 2
     confirmation = message.answer.await_args_list[1]
     assert confirmation.args[0].startswith("🎯 Новый челлендж")
-    assert confirmation.kwargs["reply_markup"].inline_keyboard[0][0].callback_data == "chl:new:confirm"
+    assert any(
+        button.callback_data == "chl:new:confirm"
+        for row in confirmation.kwargs["reply_markup"].inline_keyboard
+        for button in row
+    )

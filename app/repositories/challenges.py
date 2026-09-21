@@ -141,3 +141,15 @@ class ChallengeRepository:
         await self._session.flush()
         await self._session.refresh(participant)
         return participant
+
+    async def set_dates(
+        self,
+        challenge: Challenge,
+        start_date: date,
+        end_date: date,
+    ) -> Challenge:
+        challenge.start_date = start_date
+        challenge.end_date = end_date
+        await self._session.flush()
+        await self._session.refresh(challenge)
+        return challenge
