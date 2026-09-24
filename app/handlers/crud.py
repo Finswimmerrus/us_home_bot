@@ -1443,6 +1443,16 @@ def _challenge_missed_label(challenge: Any, day: str) -> str:
     return f"✖️ Пропуск {day}"
 
 
+def _challenge_result_button(
+    label: str,
+    callback_data: str,
+    entry: Any | None,
+    status: str,
+) -> tuple[str, str]:
+    prefix = "✓ " if entry is not None and entry.status == status else ""
+    return (f"{prefix}{label}", callback_data)
+
+
 def _challenge_text(challenge: Any, viewer_id: int, today: date) -> str:
     participant_by_id = {participant.user_id: participant for participant in challenge.participants}
     today_entry = _challenge_entry(challenge, viewer_id, today)
@@ -1490,26 +1500,45 @@ def _challenge_detail_markup(
                 ("🏁 Окончание", f"chl:date_edit:{challenge.id}:end"),
             ]
         )
-    if (
-        show_today_prompt
-        and challenge.start_date <= today <= challenge.end_date
-        and _challenge_entry(challenge, user_id, today) is None
-    ):
+    if show_today_prompt and challenge.start_date <= today <= challenge.end_date:
+        today_entry = _challenge_entry(challenge, user_id, today)
         rows.extend(
             [
-                [(_challenge_success_label(challenge, "сегодня"), f"chl:ok:{challenge.id}")],
-                [(_challenge_missed_label(challenge, "сегодня"), f"chl:miss:{challenge.id}")],
+                [
+                    _challenge_result_button(
+                        _challenge_success_label(challenge, "сегодня"),
+                        f"chl:ok:{challenge.id}",
+                        today_entry,
+                        "SUCCESS",
+                    )
+                ],
+                [
+                    _challenge_result_button(
+                        _challenge_missed_label(challenge, "сегодня"),
+                        f"chl:miss:{challenge.id}",
+                        today_entry,
+                        "MISSED",
+                    )
+                ],
             ]
         )
     yesterday = today - timedelta(days=1)
-    if (
-        challenge.start_date <= yesterday <= challenge.end_date
-        and _challenge_entry(challenge, user_id, yesterday) is None
-    ):
+    if challenge.start_date <= yesterday <= challenge.end_date:
+        yesterday_entry = _challenge_entry(challenge, user_id, yesterday)
         rows.append(
             [
-                (_challenge_success_label(challenge, "вчера"), f"chl:yok:{challenge.id}"),
-                (_challenge_missed_label(challenge, "вчера"), f"chl:ymiss:{challenge.id}"),
+                _challenge_result_button(
+                    _challenge_success_label(challenge, "вчера"),
+                    f"chl:yok:{challenge.id}",
+                    yesterday_entry,
+                    "SUCCESS",
+                ),
+                _challenge_result_button(
+                    _challenge_missed_label(challenge, "вчера"),
+                    f"chl:ymiss:{challenge.id}",
+                    yesterday_entry,
+                    "MISSED",
+                ),
             ]
         )
     rows.append([("🔄 Обновить", f"chl:status:{challenge.id}")])
