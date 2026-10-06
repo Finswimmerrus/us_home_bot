@@ -26,6 +26,7 @@ class MarkdownTable:
     rows: tuple[tuple[str, ...], ...]
     alignments: tuple[str, ...]
     has_header: bool = True
+    title: str | None = None
 
     @property
     def column_count(self) -> int:
@@ -194,6 +195,7 @@ def render_table_png(table: MarkdownTable) -> bytes:
     """Render a parsed Markdown table into a styled PNG byte string."""
     font = _load_font(28)
     header_font = _load_font(28, bold=True)
+    title_font = _load_font(38, bold=True)
     probe = Image.new("RGB", (1, 1))
     draw = ImageDraw.Draw(probe)
     horizontal_padding = 24
@@ -225,14 +227,23 @@ def render_table_png(table: MarkdownTable) -> bytes:
         row_heights.append(max(len(lines) for lines in wrapped) * line_height + vertical_padding * 2)
 
     margin = 28
+    title_height = 66 if table.title else 0
     image_width = sum(widths) + margin * 2
-    image_height = sum(row_heights) + margin * 2
+    image_height = sum(row_heights) + margin * 2 + title_height
     if image_height > MAX_IMAGE_HEIGHT:
         raise TableTooLargeError("Таблица получается слишком высокой для изображения.")
 
     image = Image.new("RGB", (image_width, image_height), "#f1f5f9")
     draw = ImageDraw.Draw(image)
-    y = margin
+    if table.title:
+        title_width = _text_width(draw, table.title, title_font)
+        draw.text(
+            ((image_width - title_width) / 2, margin - 4),
+            table.title,
+            font=title_font,
+            fill="#0f172a",
+        )
+    y = margin + title_height
     for row_index, (wrapped, row_height) in enumerate(zip(wrapped_rows, row_heights, strict=True)):
         background = "#334155" if row_index == 0 else ("#ffffff" if row_index % 2 else "#f8fafc")
         foreground = "#ffffff" if row_index == 0 else "#0f172a"

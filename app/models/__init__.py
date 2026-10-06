@@ -8,6 +8,7 @@ from app.models.list_item import ListItem
 from app.models.movie import Movie
 from app.models.movie_rating import MovieRating
 from app.models.note import Note
+from app.models.schedule import ScheduleEntry
 from app.models.task import Task
 from app.models.trip import Trip, TripPlace
 from app.models.user import User
@@ -29,4 +30,5 @@ __all__ = [
     "TripPlace",
     "WishlistItem",
     "Note",
+    "ScheduleEntry",
 ]

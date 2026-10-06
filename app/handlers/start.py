@@ -37,7 +37,7 @@ MAIN_MENU = ReplyKeyboardMarkup(
         [KeyboardButton(text="🛒 Списки"), KeyboardButton(text="✈️ Путешествия")],
         [KeyboardButton(text="🎁 Вишлист"), KeyboardButton(text="📝 Заметки")],
         [KeyboardButton(text="🎯 Челленджи"), KeyboardButton(text="⚙️ Настройки")],
-        [KeyboardButton(text="👥 О паре")],
+        [KeyboardButton(text="📅 Расписание"), KeyboardButton(text="👥 О паре")],
     ],
     resize_keyboard=True,
     one_time_keyboard=False,

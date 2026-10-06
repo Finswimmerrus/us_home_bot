@@ -113,4 +113,11 @@ class TaskAssignFSM(StatesGroup):
     user_id = State()
 
 
+class ScheduleFSM(StatesGroup):
+    title = State()
+    days = State()
+    time = State()
+    conflict = State()
+
+
 storage = MemoryStorage()
