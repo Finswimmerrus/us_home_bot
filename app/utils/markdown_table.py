@@ -130,7 +130,9 @@ def parse_markdown_table(text: str) -> MarkdownTable | None:
 def _font_candidates(bold: bool) -> tuple[Path, ...]:
     filename = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
     windows_filename = "arialbd.ttf" if bold else "arial.ttf"
+    bundled_filename = "NotoSans-Bold.ttf" if bold else "NotoSans-Regular.ttf"
     return (
+        Path(__file__).resolve().parents[1] / "assets" / "fonts" / bundled_filename,
         Path("/usr/share/fonts/truetype/dejavu") / filename,
         Path("/usr/share/fonts/truetype/dejavu") / filename,
         Path("C:/Windows/Fonts") / windows_filename,

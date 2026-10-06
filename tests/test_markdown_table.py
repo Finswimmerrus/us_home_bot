@@ -5,7 +5,13 @@ from io import BytesIO
 import pytest
 from PIL import Image
 
-from app.utils.markdown_table import TableTooLargeError, parse_markdown_table, render_table_png
+from app.utils.markdown_table import (
+    TableTooLargeError,
+    _font_candidates,
+    _load_font,
+    parse_markdown_table,
+    render_table_png,
+)
 
 
 def test_parse_standard_markdown_table() -> None:
@@ -54,3 +60,12 @@ def test_render_table_as_png() -> None:
     assert image.format == "PNG"
     assert image.width > 300
     assert image.height > 100
+
+
+def test_bundled_font_supports_cyrillic() -> None:
+    regular_font = _font_candidates(False)[0]
+    bold_font = _font_candidates(True)[0]
+
+    assert regular_font.exists()
+    assert bold_font.exists()
+    assert _load_font(28).getbbox("Кириллица") is not None
