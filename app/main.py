@@ -9,6 +9,7 @@ from app.config import settings
 from app.database import dispose_engine, init_database
 from app.handlers.crud import router as crud_router
 from app.handlers.fsm import storage
+from app.handlers.markdown_table import router as markdown_table_router
 from app.handlers.sections import router as sections_router
 from app.handlers.start import router as start_router
 from app.middleware import (
@@ -38,6 +39,7 @@ async def run() -> None:
     register_error_handler(dispatcher)
     dispatcher.include_router(start_router)
     dispatcher.include_router(sections_router)
+    dispatcher.include_router(markdown_table_router)
     dispatcher.include_router(crud_router)
 
     logger.info("Couple Bot started")
