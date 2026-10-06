@@ -60,6 +60,32 @@ async def ensure_runtime_schema(connection: AsyncConnection) -> None:
             )
         )
 
+    schedule_result = await connection.execute(text("PRAGMA table_info(schedule_entries)"))
+    schedule_columns = {row[1] for row in schedule_result.fetchall()}
+    if schedule_columns and "couple_id" not in schedule_columns:
+        await connection.execute(
+            text(
+                "ALTER TABLE schedule_entries "
+                "ADD COLUMN couple_id INTEGER REFERENCES couples(id) ON DELETE CASCADE"
+            )
+        )
+        await connection.execute(
+            text(
+                "UPDATE schedule_entries "
+                "SET couple_id = ("
+                "SELECT couple_members.couple_id FROM couple_members "
+                "WHERE couple_members.user_id = schedule_entries.user_id LIMIT 1"
+                ") WHERE couple_id IS NULL"
+            )
+        )
+    if schedule_columns:
+        await connection.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS "
+                "ix_schedule_entries_couple_id ON schedule_entries (couple_id)"
+            )
+        )
+
 
 async def init_database() -> None:
     # Importing models registers every mapped table in Base.metadata.

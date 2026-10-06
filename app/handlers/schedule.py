@@ -29,6 +29,7 @@ from app.utils.callbacks import (
     callback_int,
     cancel_keyboard,
     get_callback_message,
+    get_couple,
     inline_keyboard,
     require_user_id,
 )
@@ -78,24 +79,20 @@ def _table_for_entries(entries: list[ScheduleEntry]) -> MarkdownTable:
             entry.title.casefold(),
         ),
     )
-    rows = [("Занятие", "Дни недели", "Время")]
-    rows.extend(
-        (
-            entry.title,
-            format_weekdays(parse_weekdays(entry.weekdays)),
-            format_time_range(entry.start_minute, entry.end_minute),
-        )
-        for entry in ordered
-    )
+    rows = [("Занятие", *DAY_NAMES)]
+    for entry in ordered:
+        scheduled_days = set(parse_weekdays(entry.weekdays))
+        time = format_time_range(entry.start_minute, entry.end_minute)
+        rows.append((entry.title, *(time if day in scheduled_days else "—" for day in range(7))))
     return MarkdownTable(
         rows=tuple(rows),
-        alignments=("left", "center", "center"),
-        title="Моё расписание",
+        alignments=("left", *("center" for _ in range(7))),
+        title="Общее расписание",
     )
 
 
-async def _send_schedule(message: Message, service: ScheduleService, user_id: int) -> None:
-    entries = await service.list_entries(user_id)
+async def _send_schedule(message: Message, service: ScheduleService, couple_id: int) -> None:
+    entries = await service.list_entries(couple_id)
     if not entries:
         await message.answer(
             "📅 Расписание пока пусто.",
@@ -105,7 +102,7 @@ async def _send_schedule(message: Message, service: ScheduleService, user_id: in
     image = await asyncio.to_thread(render_table_png, _table_for_entries(entries))
     await message.answer_photo(
         BufferedInputFile(image, filename="schedule.png"),
-        caption="📅 Моё расписание",
+        caption="📅 Общее расписание",
         reply_markup=_schedule_keyboard(entries),
     )
 
@@ -119,32 +116,39 @@ def _draft_from_data(data: dict[str, Any]) -> ScheduleDraft:
     )
 
 
+async def _schedule_scope(context: Context, session: AsyncSession) -> tuple[int, int]:
+    user_id = require_user_id(context)
+    couple = await get_couple(session, user_id)
+    return couple.id, user_id
+
+
 async def _show_updated_schedule(
     message: Message,
     state: FSMContext,
     service: ScheduleService,
-    user_id: int,
+    couple_id: int,
     notice: str = "Расписание обновлено.",
 ) -> None:
     await state.clear()
     await message.answer(notice, reply_markup=ReplyKeyboardRemove())
-    await _send_schedule(message, service, user_id)
+    await _send_schedule(message, service, couple_id)
 
 
 async def _submit_candidate(
     message: Message,
     state: FSMContext,
     service: ScheduleService,
+    couple_id: int,
     user_id: int,
 ) -> None:
     data = await state.get_data()
     draft = _draft_from_data(data)
     entry_id = data.get("entry_id")
     parsed_entry_id = int(entry_id) if entry_id is not None else None
-    conflicts = await service.find_conflicts(user_id, draft, exclude_id=parsed_entry_id)
+    conflicts = await service.find_conflicts(couple_id, draft, exclude_id=parsed_entry_id)
     if not conflicts:
-        await service.save(user_id, draft, entry_id=parsed_entry_id)
-        await _show_updated_schedule(message, state, service, user_id)
+        await service.save(couple_id, user_id, draft, entry_id=parsed_entry_id)
+        await _show_updated_schedule(message, state, service, couple_id)
         return
 
     await state.set_state(ScheduleFSM.conflict)
@@ -187,7 +191,8 @@ async def cancel_schedule_message(message: Message, state: FSMContext) -> None:
 
 @router.message(StateFilter(None), lambda message: message.text == "📅 Расписание")
 async def show_schedule(message: Message, context: Context, session: AsyncSession) -> None:
-    await _send_schedule(message, ScheduleService(session), require_user_id(context))
+    couple_id, _ = await _schedule_scope(context, session)
+    await _send_schedule(message, ScheduleService(session), couple_id)
 
 
 @router.callback_query(lambda callback: callback.data == "schedule:list")
@@ -199,7 +204,8 @@ async def callback_schedule_list(
     await answer_callback(callback)
     message = get_callback_message(callback)
     if message is not None:
-        await _send_schedule(message, ScheduleService(session), require_user_id(context))
+        couple_id, _ = await _schedule_scope(context, session)
+        await _send_schedule(message, ScheduleService(session), couple_id)
 
 
 @router.callback_query(lambda callback: callback.data == "schedule:add")
@@ -230,11 +236,13 @@ async def schedule_title(
     await state.update_data(title=title)
     data = await state.get_data()
     if data.get("flow") == "edit":
+        couple_id, user_id = await _schedule_scope(context, session)
         await _submit_candidate(
             message,
             state,
             ScheduleService(session),
-            require_user_id(context),
+            couple_id,
+            user_id,
         )
         return
     await state.set_state(ScheduleFSM.days)
@@ -280,11 +288,13 @@ async def callback_schedule_days_done(
     if message is None:
         return
     if data.get("flow") == "edit":
+        couple_id, user_id = await _schedule_scope(context, session)
         await _submit_candidate(
             message,
             state,
             ScheduleService(session),
-            require_user_id(context),
+            couple_id,
+            user_id,
         )
         return
     await state.set_state(ScheduleFSM.time)
@@ -304,11 +314,13 @@ async def schedule_time(
         await message.answer(exc.message)
         return
     await state.update_data(start_minute=start_minute, end_minute=end_minute)
+    couple_id, user_id = await _schedule_scope(context, session)
     await _submit_candidate(
         message,
         state,
         ScheduleService(session),
-        require_user_id(context),
+        couple_id,
+        user_id,
     )
 
 
@@ -319,7 +331,8 @@ async def callback_schedule_item(
     session: AsyncSession,
 ) -> None:
     entry_id = callback_int((callback.data or "").rsplit(":", 1)[-1])
-    entry = await ScheduleService(session).get_entry(require_user_id(context), entry_id)
+    couple_id, _ = await _schedule_scope(context, session)
+    entry = await ScheduleService(session).get_entry(couple_id, entry_id)
     await answer_callback(callback)
     message = get_callback_message(callback)
     if message is not None:
@@ -353,7 +366,8 @@ async def callback_schedule_edit(
     entry_id = callback_int(parts[2])
     field = parts[3]
     service = ScheduleService(session)
-    entry = await service.get_entry(require_user_id(context), entry_id)
+    couple_id, _ = await _schedule_scope(context, session)
+    entry = await service.get_entry(couple_id, entry_id)
     draft = entry_to_draft(entry)
     await state.clear()
     await state.set_data(
@@ -415,12 +429,12 @@ async def callback_schedule_delete(
 ) -> None:
     entry_id = callback_int((callback.data or "").rsplit(":", 1)[-1])
     service = ScheduleService(session)
-    user_id = require_user_id(context)
-    await service.delete(user_id, entry_id)
+    couple_id, _ = await _schedule_scope(context, session)
+    await service.delete(couple_id, entry_id)
     await answer_callback(callback)
     message = get_callback_message(callback)
     if message is not None:
-        await _show_updated_schedule(message, state, service, user_id, "Занятие удалено.")
+        await _show_updated_schedule(message, state, service, couple_id, "Занятие удалено.")
 
 
 @router.callback_query(lambda callback: callback.data == "schedule:conflict:replace")
@@ -435,8 +449,13 @@ async def callback_schedule_replace_conflicts(
     entry_id = data.get("entry_id")
     parsed_entry_id = int(entry_id) if entry_id is not None else None
     service = ScheduleService(session)
-    user_id = require_user_id(context)
-    await service.replace_conflicts(user_id, draft, entry_id=parsed_entry_id)
+    couple_id, user_id = await _schedule_scope(context, session)
+    await service.replace_conflicts(
+        couple_id,
+        user_id,
+        draft,
+        entry_id=parsed_entry_id,
+    )
     await answer_callback(callback)
     message = get_callback_message(callback)
     if message is not None:
@@ -444,7 +463,7 @@ async def callback_schedule_replace_conflicts(
             message,
             state,
             service,
-            user_id,
+            couple_id,
             "Новое занятие сохранено, пересекающиеся удалены.",
         )
 
@@ -457,7 +476,7 @@ async def callback_schedule_keep_existing(
     session: AsyncSession,
 ) -> None:
     service = ScheduleService(session)
-    user_id = require_user_id(context)
+    couple_id, _ = await _schedule_scope(context, session)
     await answer_callback(callback)
     message = get_callback_message(callback)
     if message is not None:
@@ -465,7 +484,7 @@ async def callback_schedule_keep_existing(
             message,
             state,
             service,
-            user_id,
+            couple_id,
             "Сохранённое расписание оставлено без изменений.",
         )
 

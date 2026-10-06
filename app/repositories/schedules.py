@@ -10,19 +10,19 @@ class ScheduleRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def list_for_user(self, user_id: int) -> list[ScheduleEntry]:
+    async def list_for_couple(self, couple_id: int) -> list[ScheduleEntry]:
         result = await self._session.execute(
             select(ScheduleEntry)
-            .where(ScheduleEntry.user_id == user_id)
+            .where(ScheduleEntry.couple_id == couple_id)
             .order_by(ScheduleEntry.start_minute, ScheduleEntry.title)
         )
         return list(result.scalars().all())
 
-    async def get_for_user(self, user_id: int, entry_id: int) -> ScheduleEntry | None:
+    async def get_for_couple(self, couple_id: int, entry_id: int) -> ScheduleEntry | None:
         result = await self._session.execute(
             select(ScheduleEntry).where(
                 ScheduleEntry.id == entry_id,
-                ScheduleEntry.user_id == user_id,
+                ScheduleEntry.couple_id == couple_id,
             )
         )
         entry: ScheduleEntry | None = result.scalar_one_or_none()
@@ -30,14 +30,16 @@ class ScheduleRepository:
 
     async def create(
         self,
-        user_id: int,
+        couple_id: int,
+        created_by: int,
         title: str,
         weekdays: str,
         start_minute: int,
         end_minute: int,
     ) -> ScheduleEntry:
         entry = ScheduleEntry(
-            user_id=user_id,
+            couple_id=couple_id,
+            user_id=created_by,
             title=title,
             weekdays=weekdays,
             start_minute=start_minute,

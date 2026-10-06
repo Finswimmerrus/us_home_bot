@@ -6,6 +6,7 @@ from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, String, f
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+from app.models.couple import Couple
 from app.models.user import User
 
 
@@ -24,6 +25,9 @@ class ScheduleEntry(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    couple_id: Mapped[int | None] = mapped_column(
+        ForeignKey("couples.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
@@ -36,5 +40,5 @@ class ScheduleEntry(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
-    user: Mapped[User] = relationship(lazy="selectin")
-
+    couple: Mapped[Couple | None] = relationship(lazy="selectin")
+    creator: Mapped[User] = relationship(lazy="selectin")

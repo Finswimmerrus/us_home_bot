@@ -102,22 +102,22 @@ class ScheduleService:
             raise ValidationError("Некорректный интервал времени.", field="time")
         return ScheduleDraft(clean_title, normalized_days, start_minute, end_minute)
 
-    async def list_entries(self, user_id: int) -> list[ScheduleEntry]:
-        return await self._repository.list_for_user(user_id)
+    async def list_entries(self, couple_id: int) -> list[ScheduleEntry]:
+        return await self._repository.list_for_couple(couple_id)
 
-    async def get_entry(self, user_id: int, entry_id: int) -> ScheduleEntry:
-        entry = await self._repository.get_for_user(user_id, entry_id)
+    async def get_entry(self, couple_id: int, entry_id: int) -> ScheduleEntry:
+        entry = await self._repository.get_for_couple(couple_id, entry_id)
         if entry is None:
             raise NotFound("Schedule entry", entry_id)
         return entry
 
     async def find_conflicts(
         self,
-        user_id: int,
+        couple_id: int,
         draft: ScheduleDraft,
         exclude_id: int | None = None,
     ) -> list[ScheduleEntry]:
-        entries = await self.list_entries(user_id)
+        entries = await self.list_entries(couple_id)
         return [
             entry
             for entry in entries
@@ -126,19 +126,21 @@ class ScheduleService:
 
     async def save(
         self,
-        user_id: int,
+        couple_id: int,
+        created_by: int,
         draft: ScheduleDraft,
         entry_id: int | None = None,
     ) -> ScheduleEntry:
         if entry_id is None:
             return await self._repository.create(
-                user_id,
+                couple_id,
+                created_by,
                 draft.title,
                 serialize_weekdays(draft.weekdays),
                 draft.start_minute,
                 draft.end_minute,
             )
-        entry = await self.get_entry(user_id, entry_id)
+        entry = await self.get_entry(couple_id, entry_id)
         entry.title = draft.title
         entry.weekdays = serialize_weekdays(draft.weekdays)
         entry.start_minute = draft.start_minute
@@ -147,16 +149,16 @@ class ScheduleService:
 
     async def replace_conflicts(
         self,
-        user_id: int,
+        couple_id: int,
+        created_by: int,
         draft: ScheduleDraft,
         entry_id: int | None = None,
     ) -> ScheduleEntry:
-        conflicts = await self.find_conflicts(user_id, draft, exclude_id=entry_id)
+        conflicts = await self.find_conflicts(couple_id, draft, exclude_id=entry_id)
         for conflict in conflicts:
             await self._repository.delete(conflict)
-        return await self.save(user_id, draft, entry_id=entry_id)
+        return await self.save(couple_id, created_by, draft, entry_id=entry_id)
 
-    async def delete(self, user_id: int, entry_id: int) -> None:
-        entry = await self.get_entry(user_id, entry_id)
+    async def delete(self, couple_id: int, entry_id: int) -> None:
+        entry = await self.get_entry(couple_id, entry_id)
         await self._repository.delete(entry)
-

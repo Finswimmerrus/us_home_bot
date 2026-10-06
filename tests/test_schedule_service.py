@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import app.models  # noqa: F401
-from app.database import Base
+from app.database import Base, ensure_runtime_schema
 from app.exceptions import ValidationError
+from app.models.couple import Couple
 from app.models.user import User
 from app.services.schedule_service import (
     ScheduleDraft,
@@ -47,18 +49,45 @@ async def test_replace_conflicting_entry() -> None:
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as session:
         user = User(telegram_id=12345)
-        session.add(user)
+        partner = User(telegram_id=67890)
+        couple = Couple(name="Общая пара")
+        session.add_all([user, partner, couple])
         await session.flush()
         service = ScheduleService(session)
         yoga = ScheduleDraft("Йога", (0, 2), 18 * 60, 19 * 60)
         dinner = ScheduleDraft("Ужин", (0,), 18 * 60 + 30, 20 * 60)
 
-        await service.save(user.id, yoga)
-        conflicts = await service.find_conflicts(user.id, dinner)
+        await service.save(couple.id, user.id, yoga)
+        conflicts = await service.find_conflicts(couple.id, dinner)
         assert [entry.title for entry in conflicts] == ["Йога"]
+        assert [entry.title for entry in await service.list_entries(couple.id)] == ["Йога"]
 
-        await service.replace_conflicts(user.id, dinner)
-        entries = await service.list_entries(user.id)
+        await service.replace_conflicts(couple.id, partner.id, dinner)
+        entries = await service.list_entries(couple.id)
         assert [entry.title for entry in entries] == ["Ужин"]
+
+    await engine.dispose()
+
+
+async def test_legacy_schedule_is_migrated_to_couple() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        for statement in (
+            "CREATE TABLE couples (id INTEGER PRIMARY KEY)",
+            "CREATE TABLE users (id INTEGER PRIMARY KEY)",
+            "CREATE TABLE couple_members (id INTEGER PRIMARY KEY, couple_id INTEGER, user_id INTEGER)",
+            "CREATE TABLE schedule_entries (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL)",
+            "INSERT INTO couples (id) VALUES (10)",
+            "INSERT INTO users (id) VALUES (20)",
+            "INSERT INTO couple_members (id, couple_id, user_id) VALUES (1, 10, 20)",
+            "INSERT INTO schedule_entries (id, user_id) VALUES (1, 20)",
+        ):
+            await connection.execute(text(statement))
+
+        await ensure_runtime_schema(connection)
+        result = await connection.execute(
+            text("SELECT couple_id FROM schedule_entries WHERE id = 1")
+        )
+        assert result.scalar_one() == 10
 
     await engine.dispose()
